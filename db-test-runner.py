@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.1.1-draft"
+VERSION = "0.1.2-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -52,6 +52,26 @@ SCENARIO_IDS = {
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_event_timestamp(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith(" UTC"):
+        normalized = normalized[:-4] + "+00:00"
+    elif normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def timestamps_match(native: str, received: str, tolerance_seconds: float = 0.001) -> bool:
+    try:
+        difference = abs((parse_event_timestamp(native) - parse_event_timestamp(received)).total_seconds())
+    except ValueError:
+        return False
+    return difference <= tolerance_seconds
 
 
 def make_run_id(database: str) -> str:
@@ -264,6 +284,10 @@ class LabContext:
     def receiver_log(self) -> str:
         source = RECEIVER_SOURCES[self.database]
         return f"/var/log/clients/{self.client_hostname}/{source}"
+
+    @property
+    def receiver_client_dir(self) -> str:
+        return f"/var/log/clients/{self.client_hostname}"
 
     @property
     def run_token(self) -> str:
@@ -739,13 +763,7 @@ def pg_timestamp(context: LabContext) -> ScenarioResult:
     if receiver.stdout.strip():
         match = re.match(r"^<\d+>1\s+(\S+)", receiver.stdout.strip().splitlines()[-1])
         receiver_timestamp = match.group(1) if match else ""
-    same_instant = False
-    try:
-        native_dt = datetime.fromisoformat(native_timestamp.replace("Z", "+00:00"))
-        receiver_dt = datetime.fromisoformat(receiver_timestamp.replace("Z", "+00:00"))
-        same_instant = native_dt == receiver_dt
-    except ValueError:
-        pass
+    same_instant = timestamps_match(native_timestamp, receiver_timestamp)
     assertions = [
         AssertionResult("native timestamp parsed", bool(native_timestamp), native_timestamp or "missing"),
         AssertionResult("receiver timestamp parsed", bool(receiver_timestamp), receiver_timestamp or "missing"),
@@ -775,22 +793,37 @@ def pg_failed_login(context: LabContext) -> ScenarioResult:
 
 def pg_connection_lifecycle(context: LabContext) -> ScenarioResult:
     started = utc_now()
-    app = f"lc_c2c_{secrets.token_hex(5)}"
-    trigger = context.local.run(
-        f"sudo -u postgres psql {shlex.quote('dbname=postgres application_name=' + app)} -c 'SELECT 1;'",
+    database = f"lc_c2c_{secrets.token_hex(5)}"
+    create = context.local.run(
+        f"sudo -u postgres createdb {shlex.quote(database)}",
         timeout=30,
     )
-    time.sleep(2)
-    receiver = context.receiver_grep(app)
-    commands = [trigger, receiver]
+    trigger = context.local.run(
+        f"sudo -u postgres psql {shlex.quote('dbname=' + database + ' application_name=lc_c2c_runner')} -c 'SELECT 1;'",
+        timeout=30,
+    )
+    receiver_command = (
+        f"for i in $(seq 1 30); do OUT=$(grep -F -- {shlex.quote(database)} {shlex.quote(context.receiver_log)} || true); "
+        "if printf '%s' \"$OUT\" | grep -qi 'connection authorized' && printf '%s' \"$OUT\" | grep -qi 'disconnection'; "
+        "then printf '%s\\n' \"$OUT\"; exit 0; fi; sleep 1; done; printf '%s\\n' \"$OUT\"; exit 1"
+    )
+    receiver = context.receiver.run(receiver_command, sudo=True, timeout=40)
+    drop = context.local.run(f"sudo -u postgres dropdb --if-exists {shlex.quote(database)}", timeout=30)
+    commands = [create, trigger, receiver, drop]
     text = receiver.stdout.lower()
+    lifecycle_lines = [
+        line
+        for line in receiver.stdout.splitlines()
+        if "connection authorized" in line.lower() or "disconnection" in line.lower()
+    ]
     assertions = [
+        AssertionResult("disposable database created", create.returncode == 0, command_fact(create)),
         AssertionResult("connection completed", trigger.returncode == 0, command_fact(trigger)),
         AssertionResult("connection recorded", "connection authorized" in text or "connection received" in text, text[-1000:]),
         AssertionResult("disconnection recorded", "disconnection" in text, text[-1000:]),
-        AssertionResult("informational priority", any(line.startswith("<14>") for line in receiver.stdout.splitlines()), "priorities=" + str(re.findall(r"^<(\d+)>", receiver.stdout, re.MULTILINE))),
+        AssertionResult("informational priority", bool(lifecycle_lines) and all(line.startswith("<14>") for line in lifecycle_lines), "priorities=" + str([re.match(r"^<(\d+)>", line).group(1) if re.match(r"^<(\d+)>", line) else "missing" for line in lifecycle_lines])),
     ]
-    return evaluated_result("C2c", "Connection and disconnection logging", started, commands, assertions, "Connection lifecycle events were delivered at informational priority")
+    return evaluated_result("C2c", "Connection and disconnection logging", started, commands, assertions, "Connection lifecycle events were delivered at informational priority", "Passed" if drop.returncode == 0 else "Failed")
 
 
 def pg_role_ddl(context: LabContext) -> ScenarioResult:
@@ -1063,11 +1096,21 @@ def pg_password_redaction(context: LabContext) -> ScenarioResult:
     cleanup_sql = f"DROP ROLE IF EXISTS {role};"
     trigger = context.local.run(f"sudo -u postgres psql -v ON_ERROR_STOP=1 -c {shlex.quote(create_sql)}", timeout=30)
     receiver = context.receiver_grep(role)
+    time.sleep(5)
+    leak_check = context.receiver.run(
+        f"grep -R -F -- {shlex.quote(secret)} {shlex.quote(context.receiver_client_dir)}",
+        sudo=True,
+        timeout=30,
+    )
     cleanup = context.local.run(f"sudo -u postgres psql -v ON_ERROR_STOP=1 -c {shlex.quote(cleanup_sql)}", timeout=30)
-    commands = [trigger, receiver, cleanup]
+    commands = [trigger, receiver, leak_check, cleanup]
     assertions = [
         AssertionResult("role DDL delivered", role in receiver.stdout, f"role_visible={role in receiver.stdout}"),
-        AssertionResult("password absent", secret not in receiver.stdout, "secret absent" if secret not in receiver.stdout else "secret visible"),
+        AssertionResult(
+            "password absent from every received source",
+            leak_check.returncode == 1 and not leak_check.stdout,
+            "secret absent" if leak_check.returncode == 1 and not leak_check.stdout else "secret visible or search failed",
+        ),
     ]
     return evaluated_result("G1", "Password redaction", started, commands, assertions, "Disposable password was redacted while the role DDL remained visible", "Passed" if cleanup.returncode == 0 else "Failed")
 
@@ -1186,7 +1229,7 @@ def skipped_scenario(scenario_id: str, name: str, reason: str, risk: Risk = "man
         return ScenarioResult(scenario_id, name, "Not Tested", reason, now, now)
 
     effective_risk: Risk = "safe" if risk == "manual" else risk
-    return Scenario(scenario_id, name, effective_risk, execute)
+    return Scenario(scenario_id, name, effective_risk, execute, quiet=True)
 
 
 def postgresql_scenarios() -> list[Scenario]:
@@ -1385,6 +1428,8 @@ def command_run(args: argparse.Namespace) -> int:
         policy = ExecutionPolicy(args.include_disruptive, args.include_destructive)
         results = ScenarioOrchestrator(policy, evidence, context).run(scenarios)
         evidence.finalize()
+        totals = {status: sum(result.status == status for result in results) for status in STATUSES}
+        print("\nRun totals: " + ", ".join(f"{status}={count}" for status, count in totals.items() if count))
         print(f"\nEvidence: {evidence.run_dir}")
         if any(result.status in {"Cleanup Failed", "Inconclusive"} for result in results):
             return 3
@@ -1457,6 +1502,7 @@ class Scenario:
     name: str
     risk: Risk
     execute: Callable[[Any], ScenarioResult | None]
+    quiet: bool = False
 
 
 @dataclass(frozen=True)
@@ -1502,7 +1548,8 @@ class ScenarioOrchestrator:
                     ended_at=now,
                 )
             else:
-                print(f"[{scenario.scenario_id}] {scenario.name}", flush=True)
+                if not scenario.quiet:
+                    print(f"[{scenario.scenario_id}] {scenario.name}", flush=True)
                 try:
                     result = scenario.execute(self.context)
                     if result is None:
@@ -1519,7 +1566,8 @@ class ScenarioOrchestrator:
                     )
             self.evidence.record_result(result)
             results.append(result)
-            print(f"[{scenario.scenario_id}] {result.status}: {result.reason}", flush=True)
+            if not scenario.quiet:
+                print(f"[{scenario.scenario_id}] {result.status}: {result.reason}", flush=True)
         return results
 
 
