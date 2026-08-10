@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.0-draft"
+VERSION = "0.4.1-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -38,6 +38,8 @@ ExecutionMode = Literal["endpoint", "endpoint-pending", "clone", "environment", 
 LAB_STABILITY_MINUTES = 5
 LAB_OUTAGE_MINUTES = 5
 LAB_SOAK_MINUTES = 5
+LARGE_RECORD_PAYLOAD_BYTES = 2 * 1024 * 1024
+LARGE_RECORD_OVERHEAD_BYTES = 64 * 1024
 RECEIVER_SOURCES = {
     "postgresql": "postgres_log.log",
     "mysql": "mysql_log.log",
@@ -74,6 +76,14 @@ def timestamps_match(native: str, received: str, tolerance_seconds: float = 0.00
     except ValueError:
         return False
     return difference <= tolerance_seconds
+
+
+def parse_size_bytes(value: str) -> int | None:
+    match = re.fullmatch(r"\s*(\d+)\s*([kmgt]?)\s*", value, re.IGNORECASE)
+    if not match:
+        return None
+    multipliers = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+    return int(match.group(1)) * multipliers[match.group(2).lower()]
 
 
 def make_run_id(database: str) -> str:
@@ -316,6 +326,23 @@ class LabContext:
             time.sleep(1)
         return last or CommandResult(command, 1, "", "No receiver check executed", utc_now(), utc_now())
 
+    def receiver_event(self, marker: str, timeout: float = 30) -> CommandResult:
+        command = (
+            f"test -f {shlex.quote(self.receiver_log)} && "
+            f"awk -v marker={shlex.quote(marker)} '"
+            "index($0, marker) { capture=1 } "
+            "capture { if (seen && $0 ~ /^<[0-9]+>1[[:space:]]/) exit; print; seen=1 }' "
+            f"{shlex.quote(self.receiver_log)}"
+        )
+        deadline = time.monotonic() + timeout
+        last: CommandResult | None = None
+        while time.monotonic() < deadline:
+            last = self.receiver.run(command, sudo=True, timeout=10)
+            if last.returncode == 0 and last.stdout.strip():
+                return last
+            time.sleep(1)
+        return last or CommandResult(command, 1, "", "No receiver check executed", utc_now(), utc_now())
+
 
 @dataclass
 class PreflightReport:
@@ -514,6 +541,21 @@ def evaluated_result(
     )
 
 
+def receiver_message_capacity(context: LabContext) -> tuple[CommandResult, int | None, str]:
+    command = (
+        "grep -hEio '(maxDataSize|maxMessageSize)[[:space:]]*=[[:space:]]*\"[^\"]+\"' "
+        "/etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null"
+    )
+    result = context.receiver.run(command, sudo=True, timeout=30)
+    matches = re.findall(r'maxDataSize\s*=\s*"([^"]+)"', result.stdout, re.IGNORECASE)
+    if not matches:
+        matches = re.findall(r'maxMessageSize\s*=\s*"([^"]+)"', result.stdout, re.IGNORECASE)
+    configured = matches[-1] if matches else "8k (rsyslog default)"
+    if not matches:
+        return result, 8 * 1024, configured
+    return result, parse_size_bytes(configured), configured
+
+
 def postgres_comment(context: LabContext, marker: str) -> CommandResult:
     sql = f"COMMENT ON TABLE public.lc_runner_anchor IS '{marker}';"
     return context.local.run(f"sudo -u postgres psql -v ON_ERROR_STOP=1 -q -c {shlex.quote(sql)}", timeout=30)
@@ -668,7 +710,7 @@ def pg_format_case(
             f"sudo -u postgres psql -v ON_ERROR_STOP=1 -c {shlex.quote(query)}",
             timeout=60,
         )
-        received = context.receiver_grep(marker, timeout=90)
+        received = context.receiver_event(marker, timeout=90)
         count = context.receiver.run(
             f"grep -Fc -- {shlex.quote(marker)} {shlex.quote(context.receiver_log)} || true",
             sudo=True,
@@ -830,14 +872,24 @@ def pg_static_binary(context: LabContext) -> ScenarioResult:
 def pg_non_root_service(context: LabContext) -> ScenarioResult:
     started = utc_now()
     service_user = context.local.run("systemctl show -p User --value log-collector", timeout=15)
+    effective_user = context.local.run(
+        "PID=$(systemctl show -p MainPID --value log-collector); test \"$PID\" -gt 0 && ps -o user= -p \"$PID\" | xargs",
+        timeout=15,
+    )
     current_log = context.local.run("sudo -u postgres psql -Atc \"SELECT pg_current_logfile();\"", timeout=15)
     path = current_log.stdout.strip()
     readable = context.local.run(f"sudo -u log-collector test -r {shlex.quote(path)}", timeout=15) if path else current_log
+    unit_identity = service_user.stdout.strip() or "unset"
+    process_identity = effective_user.stdout.strip() or "missing"
     assertions = [
-        AssertionResult("dedicated service identity", service_user.stdout.strip() == "log-collector", command_fact(service_user)),
+        AssertionResult(
+            "dedicated service identity",
+            effective_user.returncode == 0 and process_identity == "log-collector",
+            f"unit_user={unit_identity} effective_user={process_identity}",
+        ),
         AssertionResult("database log readable without root", bool(path) and readable.returncode == 0, path or command_fact(readable)),
     ]
-    return evaluated_result("I8", "Non-root collector with ACL access", started, [service_user, current_log, readable], assertions, "Dedicated log-collector service account can read the active PostgreSQL log")
+    return evaluated_result("I8", "Non-root collector with ACL access", started, [service_user, effective_user, current_log, readable], assertions, "The collector process runs as log-collector and can read the active PostgreSQL log")
 
 
 def pg_basic_delivery(context: LabContext) -> ScenarioResult:
@@ -1632,9 +1684,33 @@ def pg_fresh_state(context: LabContext) -> ScenarioResult:
 
 def pg_large_record(context: LabContext) -> ScenarioResult:
     started = utc_now()
+    capacity_check, capacity, configured = receiver_message_capacity(context)
+    required = LARGE_RECORD_PAYLOAD_BYTES + LARGE_RECORD_OVERHEAD_BYTES
+    if capacity is not None and capacity < required:
+        configured_kib = capacity // 1024
+        required_kib = required // 1024
+        return ScenarioResult(
+            scenario_id="G9",
+            name="Multi-megabyte PostgreSQL record",
+            status="Inconclusive",
+            reason=(
+                f"Receiver maxDataSize is {configured_kib} KiB; at least {required_kib} KiB is required "
+                "to distinguish collector truncation from receiver truncation"
+            ),
+            started_at=started,
+            ended_at=utc_now(),
+            assertions=[
+                AssertionResult(
+                    "receiver accepts the full test record",
+                    False,
+                    f"configured={configured or 'unknown'} required_bytes={required}",
+                )
+            ],
+            commands=[capacity_check],
+        )
     prefix = context.marker("G9", "begin")
     suffix = context.marker("G9", "end")
-    sql = f"DO $lc$ BEGIN RAISE WARNING '%', '{prefix}' || repeat('x', 2097152) || '{suffix}'; END $lc$;"
+    sql = f"DO $lc$ BEGIN RAISE WARNING '%', '{prefix}' || repeat('x', {LARGE_RECORD_PAYLOAD_BYTES}) || '{suffix}'; END $lc$;"
     trigger = context.local.run(f"sudo -u postgres psql -v ON_ERROR_STOP=1 -c {shlex.quote(sql)}", timeout=120)
     received = context.receiver_grep(prefix, timeout=120)
     service = context.local.run("systemctl is-active log-collector", timeout=15)
@@ -1644,7 +1720,7 @@ def pg_large_record(context: LabContext) -> ScenarioResult:
         AssertionResult("large event not truncated", suffix in received.stdout, f"suffix_visible={suffix in received.stdout} received_bytes={len(received.stdout.encode('utf-8'))}"),
         AssertionResult("collector remained active", service.stdout.strip() == "active", command_fact(service)),
     ]
-    return evaluated_result("G9", "Multi-megabyte PostgreSQL record", started, [trigger, received, service], assertions, "A multi-megabyte database record reached the receiver without mid-record truncation")
+    return evaluated_result("G9", "Multi-megabyte PostgreSQL record", started, [capacity_check, trigger, received, service], assertions, "A multi-megabyte database record reached the receiver without mid-record truncation")
 
 
 def pg_malformed_record(context: LabContext) -> ScenarioResult:
@@ -4122,17 +4198,32 @@ def mysql_family_permission_recovery(context: LabContext) -> ScenarioResult:
 
 def mysql_family_large_record(context: LabContext) -> ScenarioResult:
     started = utc_now()
-    marker = context.marker("G9")
+    capacity_check, capacity, configured = receiver_message_capacity(context)
+    required = LARGE_RECORD_PAYLOAD_BYTES + LARGE_RECORD_OVERHEAD_BYTES
+    if capacity is not None and capacity < required:
+        return ScenarioResult(
+            scenario_id="G9",
+            name="Multi-megabyte database record",
+            status="Inconclusive",
+            reason=f"Receiver maxDataSize is {capacity // 1024} KiB; at least {required // 1024} KiB is required before testing truncation",
+            started_at=started,
+            ended_at=utc_now(),
+            assertions=[AssertionResult("receiver accepts the full test record", False, f"configured={configured} required_bytes={required}")],
+            commands=[capacity_check],
+        )
+    prefix = context.marker("G9", "begin")
+    suffix = context.marker("G9", "end")
     binary = "mysql" if context.database == "mysql" else "mariadb"
-    trigger = context.local.run(f"{{ printf 'SELECT /*{marker}*/ LENGTH(\\\''; head -c 2097152 /dev/zero | tr '\\0' x; printf '\\\') AS payload_len;\\n'; }} | sudo {binary} --max-allowed-packet=8M", timeout=180)
-    received = context.receiver_grep(marker, timeout=120)
+    trigger = context.local.run(f"{{ printf 'SELECT /*{prefix}*/ LENGTH(\\\''; head -c {LARGE_RECORD_PAYLOAD_BYTES} /dev/zero | tr '\\0' x; printf '\\\') /*{suffix}*/ AS payload_len;\\n'; }} | sudo {binary} --max-allowed-packet=8M", timeout=180)
+    received = context.receiver_event(prefix, timeout=120)
     service = context.local.run("systemctl is-active log-collector", timeout=15)
     assertions = [
         AssertionResult("multi-megabyte query executed", trigger.returncode == 0 and "2097152" in trigger.stdout, command_fact(trigger)),
-        AssertionResult("large record marker delivered", marker in received.stdout, command_fact(received)),
+        AssertionResult("large record beginning delivered", prefix in received.stdout, f"prefix_visible={prefix in received.stdout}"),
+        AssertionResult("large record not truncated", suffix in received.stdout, f"suffix_visible={suffix in received.stdout} received_bytes={len(received.stdout.encode('utf-8'))}"),
         AssertionResult("collector remained active", service.stdout.strip() == "active", command_fact(service)),
     ]
-    return evaluated_result("G9", "Multi-megabyte database record", started, [trigger, received, service], assertions, "Collector handled a multi-megabyte query record without crashing")
+    return evaluated_result("G9", "Multi-megabyte database record", started, [capacity_check, trigger, received, service], assertions, "Collector handled a multi-megabyte query record without truncation or crashing")
 
 
 def mysql_family_high_volume(context: LabContext) -> ScenarioResult:
@@ -5677,14 +5768,27 @@ def oracle_rapid_rotation(context: LabContext) -> ScenarioResult:
 
 def oracle_large_record(context: LabContext) -> ScenarioResult:
     started = utc_now()
+    capacity_check, capacity, configured = receiver_message_capacity(context)
+    required = LARGE_RECORD_PAYLOAD_BYTES + LARGE_RECORD_OVERHEAD_BYTES
+    if capacity is not None and capacity < required:
+        return ScenarioResult(
+            scenario_id="G9",
+            name="Multi-megabyte Oracle record",
+            status="Inconclusive",
+            reason=f"Receiver maxDataSize is {capacity // 1024} KiB; at least {required // 1024} KiB is required before testing truncation",
+            started_at=started,
+            ended_at=utc_now(),
+            assertions=[AssertionResult("receiver accepts the full test record", False, f"configured={configured} required_bytes={required}")],
+            commands=[capacity_check],
+        )
     prefix = context.marker("G9", "begin")
     suffix = context.marker("G9", "end")
     paths_result = oracle_path_query(context)
     trace = oracle_paths(paths_result).get("TRACE", "")
     current = context.local.run(f"find {shlex.quote(trace)} -maxdepth 1 -type f -name 'alert_*.log' -print -quit", timeout=15) if trace else paths_result
     path = current.stdout.strip()
-    append = context.local.run(f"{{ printf %s {shlex.quote(prefix)}; head -c 2097152 /dev/zero | tr '\\0' x; printf '%s\\n' {shlex.quote(suffix)}; }} | sudo tee -a {shlex.quote(path)} >/dev/null", timeout=120) if path else current
-    received = context.receiver_grep(prefix, timeout=180)
+    append = context.local.run(f"{{ printf %s {shlex.quote(prefix)}; head -c {LARGE_RECORD_PAYLOAD_BYTES} /dev/zero | tr '\\0' x; printf '%s\\n' {shlex.quote(suffix)}; }} | sudo tee -a {shlex.quote(path)} >/dev/null", timeout=120) if path else current
+    received = context.receiver_event(prefix, timeout=180)
     service = context.local.run("systemctl is-active log-collector", timeout=15)
     assertions = [
         AssertionResult("multi-megabyte alert record appended", append.returncode == 0, command_fact(append)),
@@ -5692,7 +5796,7 @@ def oracle_large_record(context: LabContext) -> ScenarioResult:
         AssertionResult("large event not truncated", suffix in received.stdout, f"suffix={suffix in received.stdout} bytes={len(received.stdout.encode())}"),
         AssertionResult("collector remained active", service.stdout.strip() == "active", command_fact(service)),
     ]
-    return evaluated_result("G9", "Multi-megabyte Oracle record", started, [paths_result, current, append, received, service], assertions, "A multi-megabyte Oracle record reached the receiver without truncation")
+    return evaluated_result("G9", "Multi-megabyte Oracle record", started, [capacity_check, paths_result, current, append, received, service], assertions, "A multi-megabyte Oracle record reached the receiver without truncation")
 
 
 def oracle_buffer_cap(context: LabContext) -> ScenarioResult:

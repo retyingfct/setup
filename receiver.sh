@@ -108,6 +108,7 @@ log_root=${log_root%/}
 retention=$(ask_number 'Number of daily rotations to retain' '14' 1 3650)
 queue_entries=$(ask_number 'Maximum queued events' '50000' 1000 10000000)
 queue_disk_mb=$(ask_number 'Maximum receiver queue disk usage (MB)' '256' 16 1048576)
+max_message_kb=$(ask_number 'Maximum RELP message size (KiB)' '4096' 128 65536)
 
 manage_firewall=false
 if confirm "Add a UFW allow rule for TCP port $relp_port" y; then
@@ -121,6 +122,7 @@ say "  RELP port:          $relp_port/tcp"
 say "  Log directory:      $log_root/<hostname>/<source>.log"
 say "  Retention:          $retention daily rotations"
 say "  Queue:              $queue_entries events, ${queue_disk_mb} MB disk"
+say "  Maximum message:    ${max_message_kb} KiB"
 say "  Add UFW rule:       $manage_firewall"
 say ''
 
@@ -206,7 +208,7 @@ tmp_logrotate=$(mktemp)
     printf '%s\n' 'input(type="imrelp"'
     if [[ -n $bind_line ]]; then printf '%s\n' "$bind_line"; fi
     printf '    port="%s"\n' "$relp_port"
-    printf '%s\n' '    maxDataSize="128k"'
+    printf '    maxDataSize="%sk"\n' "$max_message_kb"
     printf '%s\n' '    ruleset="logcollector")'
 } > "$tmp_rsyslog"
 
