@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.6-draft"
+VERSION = "0.4.7-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -300,17 +300,18 @@ class LabContext:
     local: LocalExecutor
     receiver: SSHExecutor
     client_hostname: str
+    receiver_hostname: str | None = None
     evidence: "EvidenceRun | None" = None
     journal: "RecoveryJournal | None" = None
 
     @property
     def receiver_log(self) -> str:
         source = RECEIVER_SOURCES[self.database]
-        return f"/var/log/clients/{self.client_hostname}/{source}"
+        return f"/var/log/clients/{self.receiver_hostname or self.client_hostname}/{source}"
 
     @property
     def receiver_client_dir(self) -> str:
-        return f"/var/log/clients/{self.client_hostname}"
+        return f"/var/log/clients/{self.receiver_hostname or self.client_hostname}"
 
     @property
     def run_token(self) -> str:
@@ -518,10 +519,15 @@ def open_lab(database: str, evidence: "EvidenceRun | None" = None) -> LabContext
     if hostname.returncode != 0 or not hostname.stdout.strip():
         receiver.close()
         raise RuntimeError("Could not determine client hostname")
+    client_hostname = hostname.stdout.strip()
+    receiver_hostname = input(f"Receiver log hostname [{client_hostname}]: ").strip() or client_hostname
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", receiver_hostname):
+        receiver.close()
+        raise ValueError("Receiver log hostname contains unsupported characters")
     if evidence:
         evidence.register_secret(config.password)
         evidence.register_secret(config.sudo_password or "")
-    return LabContext(database, local, receiver, hostname.stdout.strip(), evidence=evidence)
+    return LabContext(database, local, receiver, client_hostname, receiver_hostname, evidence=evidence)
 
 
 def evaluated_result(
@@ -6671,6 +6677,7 @@ def command_run(args: argparse.Namespace) -> int:
             {
                 "database": args.database,
                 "client_hostname": context.client_hostname,
+                "receiver_log_hostname": context.receiver_hostname or context.client_hostname,
                 "receiver_log": context.receiver_log,
                 "preflight_ready": report.ready,
                 "preflight_problems": report.problems,
