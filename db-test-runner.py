@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.3-draft"
+VERSION = "0.4.4-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -6816,8 +6816,7 @@ class ScenarioOrchestrator:
                     )
             self.evidence.record_result(result)
             results.append(result)
-            if not scenario.quiet:
-                print(f"[{scenario.scenario_id}] {result.status}: {result.reason}", flush=True)
+            print(f"[{scenario.scenario_id}] {result.status}: {result.reason}", flush=True)
         return results
 
 

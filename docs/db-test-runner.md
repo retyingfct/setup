@@ -44,7 +44,7 @@ python3 db-test-runner.py run --safe-only
 
 Destructive cases remain skipped by default. With no risk flags, the runner asks only whether to include destructive clone-only cases; approval requires typing `CLONE`. Non-interactive clone execution requires `--include-destructive --confirm-clone`. The constrained lab uses five-minute stability/outage windows; reports record the shorter duration against the upstream specification.
 
-Version `0.4.3-draft` contains all 400 management rows. Executable adapters are PostgreSQL 90/102, MySQL 90/107, MariaDB 75/91, and Oracle 80/100. Every other row is explicitly classified as environment-dependent, manual, or not applicable; no row remains generic pending work. PostgreSQL CSV assertions are evaluated after standards-compliant CSV decoding. Implemented adapters are not test results: only an actual evidence run can mark a scenario Pass or Fail.
+Version `0.4.4-draft` contains all 400 management rows. Executable adapters are PostgreSQL 90/102, MySQL 90/107, MariaDB 75/91, and Oracle 80/100. Every other row is explicitly classified as environment-dependent, manual, or not applicable and is shown in console output; no row remains generic pending work. PostgreSQL CSV assertions are evaluated after standards-compliant CSV decoding. Implemented adapters are not test results: only an actual evidence run can mark a scenario Pass or Fail.
 
 The G9 multi-megabyte test first reads the receiver's configured imrelp `maxDataSize`. A known limit below the generated record makes the scenario `Inconclusive` instead of falsely blaming the collector. Configure at least 2112 KiB; the companion `receiver.sh` defaults to 4096 KiB.
 
