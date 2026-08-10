@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.7-draft"
+VERSION = "0.4.8-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -3381,7 +3381,10 @@ def shared_engine_scenarios() -> list[Scenario]:
 
 def mysql_family_cli(context: LabContext, sql: str, timeout: float = 60) -> CommandResult:
     binary = "mysql" if context.database == "mysql" else "mariadb"
-    return context.local.run(f"sudo {binary} --batch --raw -e {shlex.quote(sql)}", timeout=timeout)
+    return context.local.run(
+        f"sudo {binary} --batch --raw --skip-column-names -e {shlex.quote(sql)}",
+        timeout=timeout,
+    )
 
 
 def mysql_family_marker(context: LabContext, marker: str) -> CommandResult:
@@ -3654,18 +3657,49 @@ def mysql_slow_case(
     statements: list[str],
     required: list[str],
     expected_count: int = 1,
-    extra_set: list[str] | None = None,
+    temporary_settings: dict[str, str] | None = None,
 ) -> ScenarioResult:
     started = utc_now()
     marker = context.marker(scenario_id)
     commands: list[CommandResult] = []
-    snapshot = mysql_family_cli(context, "SELECT @@global.slow_query_log,@@global.long_query_time,@@global.log_output;")
+    temporary_settings = temporary_settings or {}
+    extra_variables = list(temporary_settings)
+    snapshot_fields = [
+        "@@global.slow_query_log",
+        "@@global.long_query_time",
+        "@@global.log_output",
+        *(f"@@global.{name}" for name in extra_variables),
+    ]
+    snapshot = mysql_family_cli(context, f"SELECT {','.join(snapshot_fields)};")
     commands.append(snapshot)
-    values = snapshot.stdout.strip().split("\t")[-3:]
-    if len(values) != 3:
-        values = ["0", "10", "FILE"]
+    values = snapshot.stdout.rstrip("\n").split("\t")
+    if snapshot.returncode != 0 or len(values) != len(snapshot_fields):
+        raise RuntimeError(f"Could not safely capture MySQL slow-log settings: {command_fact(snapshot)}")
     change_sql = ["SET GLOBAL log_output='FILE'", "SET GLOBAL slow_query_log=ON", "SET GLOBAL long_query_time=0"]
-    change_sql.extend(extra_set or [])
+    change_sql.extend(f"SET GLOBAL {name}={value}" for name, value in temporary_settings.items())
+    restore_sql = [
+        f"SET GLOBAL slow_query_log={int(values[0].strip().upper() in {'1', 'ON'})}",
+        f"SET GLOBAL long_query_time={values[1]}",
+        f"SET GLOBAL log_output={json.dumps(values[2])}",
+    ]
+    for index, name in enumerate(extra_variables, start=3):
+        restore_sql.append(
+            f"SET GLOBAL {name}={int(values[index].strip().upper() in {'1', 'ON'})}"
+        )
+    restore_command = "; ".join(restore_sql) + ";"
+    action_id = f"{scenario_id}-{secrets.token_hex(5)}"
+    journal = getattr(context, "journal", None)
+    if journal:
+        binary = "mysql" if context.database == "mysql" else "mariadb"
+        journal.add(
+            {
+                "id": action_id,
+                "scope": "local",
+                "command": f"sudo {binary} --batch --raw --skip-column-names -e {shlex.quote(restore_command)}",
+                "sudo": False,
+                "timeout": 60,
+            }
+        )
     change = mysql_family_cli(context, "; ".join(change_sql) + ";")
     commands.append(change)
     time.sleep(2)
@@ -3682,12 +3716,11 @@ def mysql_slow_case(
         )
         commands.append(count)
     finally:
-        restore = mysql_family_cli(
-            context,
-            f"SET GLOBAL slow_query_log={int(values[0].strip().upper() in {'1', 'ON'})}; SET GLOBAL long_query_time={values[1]}; SET GLOBAL log_output={json.dumps(values[2])};",
-        )
+        restore = mysql_family_cli(context, restore_command)
         commands.append(restore)
         cleanup_ok = restore.returncode == 0
+        if cleanup_ok and journal:
+            journal.remove(action_id)
     try:
         occurrences = int(count.stdout.strip() or "0")
     except ValueError:
@@ -3716,12 +3749,12 @@ def mysql_slow_multiline(context: LabContext) -> ScenarioResult:
 
 def mysql_slow_no_index(context: LabContext) -> ScenarioResult:
     marker = context.marker("D4b", "table")[:40]
-    return mysql_slow_case(context, "D4b", "Unindexed query slow logging", [f"DROP TABLE IF EXISTS {marker}; CREATE TABLE {marker}(id INT); INSERT INTO {marker} VALUES (1),(2); SELECT /*{{marker}}*/ * FROM {marker} WHERE id=2; DROP TABLE {marker};"], ["WHERE id=2"], extra_set=["SET GLOBAL log_queries_not_using_indexes=ON"])
+    return mysql_slow_case(context, "D4b", "Unindexed query slow logging", [f"DROP TABLE IF EXISTS {marker}; CREATE TABLE {marker}(id INT); INSERT INTO {marker} VALUES (1),(2); SELECT /*{{marker}}*/ * FROM {marker} WHERE id=2; DROP TABLE {marker};"], ["WHERE id=2"], temporary_settings={"log_queries_not_using_indexes": "ON"})
 
 
 def mysql_slow_admin(context: LabContext) -> ScenarioResult:
     table = context.marker("D4c", "table")[:40]
-    return mysql_slow_case(context, "D4c", "Slow administrative statement", [f"DROP TABLE IF EXISTS {table}; CREATE TABLE {table}(id INT); ALTER TABLE {table} ADD COLUMN /*{{marker}}*/ note TEXT; DROP TABLE {table};"], ["ALTER TABLE"], extra_set=["SET GLOBAL log_slow_admin_statements=ON"])
+    return mysql_slow_case(context, "D4c", "Slow administrative statement", [f"DROP TABLE IF EXISTS {table}; CREATE TABLE {table}(id INT); ALTER TABLE {table} ADD COLUMN /*{{marker}}*/ note TEXT; DROP TABLE {table};"], ["ALTER TABLE"], temporary_settings={"log_slow_admin_statements": "ON"})
 
 
 def mysql_slow_volume(context: LabContext) -> ScenarioResult:
@@ -4916,13 +4949,15 @@ def mysql_json_error_sink(context: LabContext) -> ScenarioResult:
     installed_before = component.stdout.strip().splitlines()[-1:] == ["1"]
     old_services = mysql_family_cli(context, "SELECT @@global.log_error_services;")
     old_value = old_services.stdout.strip().splitlines()[-1] if old_services.stdout.strip() else "log_filter_internal; log_sink_internal"
+    old_verbosity = mysql_family_cli(context, "SELECT @@global.log_error_verbosity;")
+    verbosity_value = old_verbosity.stdout.strip().splitlines()[-1] if old_verbosity.stdout.strip() else "2"
     install = mysql_family_cli(context, "INSTALL COMPONENT 'file://component_log_sink_json';") if not installed_before else component
     change = mysql_family_cli(context, "SET GLOBAL log_error_services='log_filter_internal; log_sink_internal; log_sink_json'; SET GLOBAL log_error_verbosity=3;")
     restart = context.local.run("sudo systemctl restart log-collector", timeout=60)
     username = f"lc_d7a_{secrets.token_hex(5)}"
     attempt = context.local.run(f"mysql --protocol=TCP -h127.0.0.1 -u {username} --password=wrong --connect-timeout=5 -e 'SELECT 1'", timeout=15)
     received = context.receiver_grep(username, timeout=90)
-    restore_sql = f"SET GLOBAL log_error_services={json.dumps(old_value)};"
+    restore_sql = f"SET GLOBAL log_error_services={json.dumps(old_value)}; SET GLOBAL log_error_verbosity={verbosity_value};"
     if not installed_before:
         restore_sql += " UNINSTALL COMPONENT 'file://component_log_sink_json';"
     restore = mysql_family_cli(context, restore_sql)
@@ -4931,7 +4966,7 @@ def mysql_json_error_sink(context: LabContext) -> ScenarioResult:
         AssertionResult("failed login generated", attempt.returncode != 0, command_fact(attempt)),
         AssertionResult("JSON sibling source collected", username in received.stdout and ".00.json" in received.stdout, command_fact(received)),
     ]
-    return evaluated_result("D7a", "MySQL JSON error sink alongside text", started, [component, old_services, install, change, restart, attempt, received, restore], assertions, "The .00.json sibling error log was collected alongside text", "Passed" if restore.returncode == 0 else "Failed")
+    return evaluated_result("D7a", "MySQL JSON error sink alongside text", started, [component, old_services, old_verbosity, install, change, restart, attempt, received, restore], assertions, "The .00.json sibling error log was collected alongside text", "Passed" if restore.returncode == 0 else "Failed")
 
 
 def mysql_packaged_rotation(context: LabContext) -> ScenarioResult:
