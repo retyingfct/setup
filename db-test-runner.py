@@ -9,11 +9,13 @@ SSH. Credentials are held in memory and are never written to evidence.
 from __future__ import annotations
 
 import argparse
+import csv
 import dataclasses
 import fcntl
 import getpass
 import hashlib
 import importlib
+import io
 import json
 import os
 import re
@@ -30,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.1-draft"
+VERSION = "0.4.2-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -655,6 +657,19 @@ def pg_psql_flags(*statements: str) -> str:
     return " ".join(f"-c {shlex.quote(statement)}" for statement in statements)
 
 
+def normalize_postgresql_received_content(received: str) -> str:
+    separator = "[unparsed] "
+    if separator not in received:
+        return received
+    prefix, raw_csv = received.split(separator, 1)
+    try:
+        rows = list(csv.reader(io.StringIO(raw_csv), strict=True))
+    except csv.Error:
+        return received
+    decoded = "\n".join(field for row in rows for field in row)
+    return f"{prefix}[csv-decoded] {decoded}"
+
+
 def pg_format_case(
     context: LabContext,
     scenario_id: str,
@@ -728,7 +743,8 @@ def pg_format_case(
         occurrences = int(count.stdout.strip() or "0")
     except ValueError:
         occurrences = -1
-    fragments_ok = marker in received.stdout and all(fragment in received.stdout for fragment in expected_fragments)
+    normalized_received = normalize_postgresql_received_content(received.stdout)
+    fragments_ok = marker in normalized_received and all(fragment in normalized_received for fragment in expected_fragments)
     assertions = [
         AssertionResult("temporary log format applied", change.returncode == 0, command_fact(change)),
         AssertionResult("test statement executed", trigger.returncode == 0, command_fact(trigger)),
@@ -3481,12 +3497,18 @@ def mysql_family_non_root_read(context: LabContext) -> ScenarioResult:
     for path in paths:
         checks.append(context.local.run(f"sudo -u log-collector test -r {shlex.quote(path)}", timeout=15))
     service_user = context.local.run("systemctl show -p User --value log-collector", timeout=15)
+    effective_user = context.local.run(
+        "PID=$(systemctl show -p MainPID --value log-collector); test \"$PID\" -gt 0 && ps -o user= -p \"$PID\" | xargs",
+        timeout=15,
+    )
+    unit_identity = service_user.stdout.strip() or "unset"
+    process_identity = effective_user.stdout.strip() or "missing"
     assertions = [
         AssertionResult("database log paths reported", bool(paths), str(paths)),
         AssertionResult("all reported logs readable", bool(checks) and all(item.returncode == 0 for item in checks), f"readable={sum(item.returncode == 0 for item in checks)}/{len(checks)}"),
-        AssertionResult("dedicated service identity", service_user.stdout.strip() == "log-collector", command_fact(service_user)),
+        AssertionResult("dedicated service identity", effective_user.returncode == 0 and process_identity == "log-collector", f"unit_user={unit_identity} effective_user={process_identity}"),
     ]
-    return evaluated_result("I8", "Non-root collector with database-log access", started, [variables, *checks, service_user], assertions, "Dedicated collector identity can read the database logs")
+    return evaluated_result("I8", "Non-root collector with database-log access", started, [variables, *checks, service_user, effective_user], assertions, "The collector process runs as log-collector and can read the database logs")
 
 
 def mysql_family_service(context: LabContext) -> str:
@@ -5551,12 +5573,18 @@ def oracle_non_root_access(context: LabContext) -> ScenarioResult:
     for pattern in candidates:
         checks.append(context.local.run(f"FILE=$(find {shlex.quote(str(Path(pattern).parent))} -maxdepth 1 -type f -name {shlex.quote(Path(pattern).name)} -print -quit 2>/dev/null); test -z \"$FILE\" || sudo -u log-collector test -r \"$FILE\"", timeout=30))
     service_user = context.local.run("systemctl show -p User --value log-collector", timeout=15)
+    effective_user = context.local.run(
+        "PID=$(systemctl show -p MainPID --value log-collector); test \"$PID\" -gt 0 && ps -o user= -p \"$PID\" | xargs",
+        timeout=15,
+    )
+    unit_identity = service_user.stdout.strip() or "unset"
+    process_identity = effective_user.stdout.strip() or "missing"
     assertions = [
         AssertionResult("Oracle diagnostic paths discovered", bool(paths), str(paths)),
         AssertionResult("discovered files readable by service account", bool(checks) and all(item.returncode == 0 for item in checks), f"readable={sum(item.returncode == 0 for item in checks)}/{len(checks)}"),
-        AssertionResult("dedicated service identity", service_user.stdout.strip() == "log-collector", command_fact(service_user)),
+        AssertionResult("dedicated service identity", effective_user.returncode == 0 and process_identity == "log-collector", f"unit_user={unit_identity} effective_user={process_identity}"),
     ]
-    return evaluated_result("I8", "Non-root collector with Oracle-log access", started, [query, *checks, service_user], assertions, "Dedicated collector identity can read Oracle diagnostic and audit files")
+    return evaluated_result("I8", "Non-root collector with Oracle-log access", started, [query, *checks, service_user, effective_user], assertions, "The collector process runs as log-collector and can read Oracle diagnostic and audit files")
 
 
 def oracle_setup_discovery(context: LabContext) -> ScenarioResult:
