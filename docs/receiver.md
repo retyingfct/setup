@@ -31,6 +31,7 @@ An abrupt power loss can still lose events that have not reached disk. Clients r
 | Retention | 14 daily rotations |
 | Queue | 50,000 events |
 | Queue disk limit | 256 MB |
+| Maximum message | 4096 KiB for both global rsyslog and imrelp |
 
 Received events are stored as:
 

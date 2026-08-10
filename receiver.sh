@@ -182,6 +182,7 @@ tmp_logrotate=$(mktemp)
 
 {
     printf '%s\n' '# Managed by receiver.sh - Log Collector RELP receiver'
+    printf 'global(maxMessageSize="%sk")\n\n' "$max_message_kb"
     printf '%s\n\n' 'module(load="imrelp")'
     printf '%s\n' 'template(name="PerEndpointLog" type="string"'
     printf '    string="%s/%%HOSTNAME:::secpath-replace%%/%%PROGRAMNAME:::secpath-replace%%.log")\n\n' "$log_root"

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.4-draft"
+VERSION = "0.4.5-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -42,6 +42,15 @@ LAB_OUTAGE_MINUTES = 5
 LAB_SOAK_MINUTES = 5
 LARGE_RECORD_PAYLOAD_BYTES = 2 * 1024 * 1024
 LARGE_RECORD_OVERHEAD_BYTES = 64 * 1024
+RECEIVER_STOP_COMMAND = (
+    "systemctl stop syslog.socket rsyslog.service && "
+    "test -z \"$(ss -ltnH | awk '$4 ~ /:2514$/ {print $4}')\""
+)
+RECEIVER_START_COMMAND = (
+    "systemctl start syslog.socket rsyslog.service && "
+    "systemctl is-active --quiet rsyslog.service && "
+    "test -n \"$(ss -ltnH | awk '$4 ~ /:2514$/ {print $4}')\""
+)
 RECEIVER_SOURCES = {
     "postgresql": "postgres_log.log",
     "mysql": "mysql_log.log",
@@ -549,13 +558,27 @@ def receiver_message_capacity(context: LabContext) -> tuple[CommandResult, int |
         "/etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null"
     )
     result = context.receiver.run(command, sudo=True, timeout=30)
-    matches = re.findall(r'maxDataSize\s*=\s*"([^"]+)"', result.stdout, re.IGNORECASE)
-    if not matches:
-        matches = re.findall(r'maxMessageSize\s*=\s*"([^"]+)"', result.stdout, re.IGNORECASE)
-    configured = matches[-1] if matches else "8k (rsyslog default)"
-    if not matches:
-        return result, 8 * 1024, configured
-    return result, parse_size_bytes(configured), configured
+    data_matches = re.findall(r'maxDataSize\s*=\s*"([^"]+)"', result.stdout, re.IGNORECASE)
+    global_matches = re.findall(r'maxMessageSize\s*=\s*"([^"]+)"', result.stdout, re.IGNORECASE)
+    global_value = global_matches[-1] if global_matches else "8k"
+    data_value = data_matches[-1] if data_matches else global_value
+    global_bytes = parse_size_bytes(global_value)
+    data_bytes = parse_size_bytes(data_value)
+    configured = (
+        f"maxDataSize={data_value}, "
+        f"maxMessageSize={global_value}{'' if global_matches else ' (default)'}"
+    )
+    if global_bytes is None or data_bytes is None:
+        return result, None, configured
+    return result, min(global_bytes, data_bytes), configured
+
+
+def establish_receiver_outage(context: LabContext) -> CommandResult:
+    return context.receiver.run(RECEIVER_STOP_COMMAND, sudo=True, timeout=60)
+
+
+def restore_receiver_ingest(context: LabContext) -> CommandResult:
+    return context.receiver.run(RECEIVER_START_COMMAND, sudo=True, timeout=60)
 
 
 def postgres_comment(context: LabContext, marker: str) -> CommandResult:
@@ -1011,17 +1034,17 @@ def pg_receiver_outage(context: LabContext) -> ScenarioResult:
     unit = f"lc-rsyslog-recover-{secrets.token_hex(4)}"
     recovery_id = f"B5-{unit}"
     schedule = context.receiver.run(
-        f"systemd-run --unit={unit} --on-active={LAB_OUTAGE_MINUTES + 1}m /bin/systemctl start rsyslog", sudo=True, timeout=30
+        f"systemd-run --unit={unit} --on-active={LAB_OUTAGE_MINUTES + 1}m /bin/sh -c {shlex.quote(RECEIVER_START_COMMAND)}", sudo=True, timeout=30
     )
     commands.append(schedule)
     if context.journal:
-        context.journal.add({"id": recovery_id, "scope": "receiver", "command": "systemctl start rsyslog", "sudo": True, "timeout": 60})
+        context.journal.add({"id": recovery_id, "scope": "receiver", "command": RECEIVER_START_COMMAND, "sudo": True, "timeout": 60})
     initial = context.local.run(
         "printf 'pid=%s restarts=%s\\n' \"$(systemctl show -p MainPID --value log-collector)\" \"$(systemctl show -p NRestarts --value log-collector)\"",
         timeout=15,
     )
     commands.append(initial)
-    stop = context.receiver.run("systemctl stop rsyslog", sudo=True, timeout=30)
+    stop = establish_receiver_outage(context)
     commands.append(stop)
     samples: list[str] = []
     cleanup_ok = False
@@ -1035,7 +1058,7 @@ def pg_receiver_outage(context: LabContext) -> ScenarioResult:
             samples.append(sample.stdout.strip())
             time.sleep(60)
     finally:
-        restore = context.receiver.run("systemctl start rsyslog", sudo=True, timeout=60)
+        restore = restore_receiver_ingest(context)
         commands.append(restore)
         cleanup_ok = restore.returncode == 0
         context.receiver.run(f"systemctl stop {unit}.timer 2>/dev/null || true", sudo=True, timeout=15)
@@ -1710,7 +1733,7 @@ def pg_large_record(context: LabContext) -> ScenarioResult:
             name="Multi-megabyte PostgreSQL record",
             status="Inconclusive",
             reason=(
-                f"Receiver maxDataSize is {configured_kib} KiB; at least {required_kib} KiB is required "
+                f"Receiver effective message limit is {configured_kib} KiB; at least {required_kib} KiB is required "
                 "to distinguish collector truncation from receiver truncation"
             ),
             started_at=started,
@@ -1787,19 +1810,44 @@ def pg_delete_recreate_cross_engine(context: LabContext) -> ScenarioResult:
     return result
 
 
+def pg_buffer_cycle_assertions(
+    scenario_id: str,
+    outage_established: bool,
+    collector_active: bool,
+    before_bytes: int,
+    during_bytes: int,
+    receiver_restored: bool,
+    markers: set[str],
+    total_lines: int,
+) -> list[AssertionResult]:
+    assertions = [
+        AssertionResult("receiver outage established", outage_established, str(outage_established)),
+        AssertionResult("collector stayed active", collector_active, str(collector_active)),
+    ]
+    if scenario_id == "H1":
+        assertions.append(AssertionResult("disk buffer grew", during_bytes > before_bytes, f"before={before_bytes} during={during_bytes}"))
+    assertions.extend(
+        [
+            AssertionResult("receiver restored", receiver_restored, str(receiver_restored)),
+            AssertionResult("all buffered markers delivered", markers == {f"{index:03d}" for index in range(1, 301)} and total_lines == 300, f"unique={len(markers)} total_lines={total_lines}"),
+        ]
+    )
+    return assertions
+
+
 def pg_buffer_cycle(context: LabContext, scenario_id: str, name: str) -> ScenarioResult:
     started = utc_now()
     prefix = context.marker(scenario_id, "buffer")[:44]
     unit = f"lc-rsyslog-buffer-recover-{secrets.token_hex(4)}"
     action_id = f"{scenario_id}-{unit}"
     commands: list[CommandResult] = []
-    schedule = context.receiver.run("systemd-run --unit=" + unit + " --on-active=2m /bin/systemctl start rsyslog", sudo=True, timeout=30)
+    schedule = context.receiver.run(f"systemd-run --unit={unit} --on-active=2m /bin/sh -c {shlex.quote(RECEIVER_START_COMMAND)}", sudo=True, timeout=30)
     commands.append(schedule)
     if context.journal:
-        context.journal.add({"id": action_id, "scope": "receiver", "command": "systemctl start rsyslog", "sudo": True, "timeout": 60})
+        context.journal.add({"id": action_id, "scope": "receiver", "command": RECEIVER_START_COMMAND, "sudo": True, "timeout": 60})
     before_health = context.local.run("curl -fsS --max-time 5 http://127.0.0.1:9100/status", timeout=15)
     before_disk = context.local.run("sudo du -sb /var/lib/log-collector/disk_buffer 2>/dev/null | awk '{print $1}'", timeout=15)
-    stop = context.receiver.run("systemctl stop rsyslog", sudo=True, timeout=30)
+    stop = establish_receiver_outage(context)
     commands.extend([before_health, before_disk, stop])
     restore_ok = False
     try:
@@ -1815,7 +1863,7 @@ def pg_buffer_cycle(context: LabContext, scenario_id: str, name: str) -> Scenari
         service = context.local.run("systemctl is-active log-collector", timeout=15)
         commands.extend([generated, during_health, during_disk, service])
     finally:
-        restore = context.receiver.run("systemctl start rsyslog", sudo=True, timeout=60)
+        restore = restore_receiver_ingest(context)
         commands.append(restore)
         restore_ok = restore.returncode == 0
         context.receiver.run(f"systemctl stop {unit}.timer 2>/dev/null || true", sudo=True, timeout=15)
@@ -1838,13 +1886,16 @@ def pg_buffer_cycle(context: LabContext, scenario_id: str, name: str) -> Scenari
     before_bytes = max(metric(before_health.stdout, "disk_buffer_bytes"), integer(before_disk.stdout))
     during_bytes = max(metric(during_health.stdout, "disk_buffer_bytes"), integer(during_disk.stdout))
     markers = set(re.findall(re.escape(prefix) + r"_(\d{3})", all_received.stdout))
-    assertions = [
-        AssertionResult("receiver outage started", stop.returncode == 0, command_fact(stop)),
-        AssertionResult("collector stayed active", service.stdout.strip() == "active", command_fact(service)),
-        AssertionResult("disk buffer grew", during_bytes > before_bytes, f"before={before_bytes} during={during_bytes}"),
-        AssertionResult("receiver restored", restore_ok, command_fact(restore)),
-        AssertionResult("all buffered markers delivered", markers == {f"{index:03d}" for index in range(1, 301)}, f"unique={len(markers)} total_lines={len(all_received.stdout.splitlines())}"),
-    ]
+    assertions = pg_buffer_cycle_assertions(
+        scenario_id,
+        stop.returncode == 0,
+        service.stdout.strip() == "active",
+        before_bytes,
+        during_bytes,
+        restore_ok,
+        markers,
+        len(all_received.stdout.splitlines()),
+    )
     reason = "Collector stayed active and buffered events during receiver outage" if scenario_id == "H1" else "All buffered events arrived after receiver recovery"
     return evaluated_result(scenario_id, name, started, commands, assertions, reason, "Passed" if restore_ok else "Failed")
 
@@ -2389,13 +2440,13 @@ def pg_buffer_disk_full(context: LabContext) -> ScenarioResult:
     receiver_recovery = f"H11-receiver-{token}"
     local_recovery = f"H11-local-{token}"
     if context.journal:
-        context.journal.add({"id": receiver_recovery, "scope": "receiver", "command": "systemctl start rsyslog", "sudo": True, "timeout": 60})
+        context.journal.add({"id": receiver_recovery, "scope": "receiver", "command": RECEIVER_START_COMMAND, "sudo": True, "timeout": 60})
         context.journal.add({"id": local_recovery, "scope": "local", "command": f"systemctl stop log-collector; umount {mountpoint} 2>/dev/null || true; rm -f {image}; systemctl start log-collector", "sudo": True, "timeout": 120})
     prepare = context.local.run(
         f"sudo systemctl stop log-collector; truncate -s 32M {shlex.quote(image)}; sudo mkfs.ext4 -q -F {shlex.quote(image)}; sudo mount -o loop {shlex.quote(image)} {mountpoint}; sudo chown log-collector:log-collector {mountpoint}; sudo systemctl start log-collector",
         timeout=180,
     )
-    stop_receiver = context.receiver.run("systemctl stop rsyslog", sudo=True, timeout=30)
+    stop_receiver = establish_receiver_outage(context)
     cleanup_ok = False
     try:
         generator = context.local.run(
@@ -2407,7 +2458,7 @@ def pg_buffer_disk_full(context: LabContext) -> ScenarioResult:
         logs = context.local.run("sudo journalctl -u log-collector --since '-10 minutes' --no-pager | tail -n 200", timeout=30)
         service = context.local.run("systemctl is-active log-collector", timeout=15)
     finally:
-        restore_receiver = context.receiver.run("systemctl start rsyslog", sudo=True, timeout=60)
+        restore_receiver = restore_receiver_ingest(context)
         cleanup = context.local.run(f"sudo systemctl stop log-collector; sudo umount {mountpoint}; rm -f {shlex.quote(image)}; sudo systemctl start log-collector", timeout=180)
         cleanup_ok = restore_receiver.returncode == 0 and cleanup.returncode == 0
         if cleanup_ok and context.journal:
@@ -3103,14 +3154,14 @@ def pg_buffer_cap(context: LabContext) -> ScenarioResult:
     receiver_recovery = f"H3-receiver-{token}"
     local_recovery = f"H3-local-{token}"
     if context.journal:
-        context.journal.add({"id": receiver_recovery, "scope": "receiver", "command": "systemctl start rsyslog", "sudo": True, "timeout": 60})
+        context.journal.add({"id": receiver_recovery, "scope": "receiver", "command": RECEIVER_START_COMMAND, "sudo": True, "timeout": 60})
         context.journal.add({"id": local_recovery, "scope": "local", "command": f"systemctl stop log-collector; umount {mountpoint} 2>/dev/null || true; rm -f {image}; systemctl start log-collector", "sudo": True, "timeout": 180})
     before = context.local.run("curl -fsS --max-time 5 http://127.0.0.1:9100/status", timeout=15)
     prepare = context.local.run(
         f"sudo systemctl stop log-collector; truncate -s 600M {shlex.quote(image)}; sudo mkfs.ext4 -q -F {shlex.quote(image)}; sudo mount -o loop {shlex.quote(image)} {mountpoint}; sudo chown log-collector:log-collector {mountpoint}; sudo systemctl start log-collector",
         timeout=240,
     )
-    stop_receiver = context.receiver.run("systemctl stop rsyslog", sudo=True, timeout=30)
+    stop_receiver = establish_receiver_outage(context)
     cleanup_ok = False
     try:
         generator = context.local.run(
@@ -3123,7 +3174,7 @@ def pg_buffer_cap(context: LabContext) -> ScenarioResult:
         logs = context.local.run("sudo journalctl -u log-collector --since '-30 minutes' --no-pager | tail -n 300", timeout=30)
         service = context.local.run("systemctl is-active log-collector", timeout=15)
     finally:
-        restore_receiver = context.receiver.run("systemctl start rsyslog", sudo=True, timeout=60)
+        restore_receiver = restore_receiver_ingest(context)
         cleanup = context.local.run(f"sudo systemctl stop log-collector; sudo umount {mountpoint}; rm -f {shlex.quote(image)}; sudo systemctl start log-collector", timeout=240)
         cleanup_ok = restore_receiver.returncode == 0 and cleanup.returncode == 0
         if cleanup_ok and context.journal:
@@ -4066,8 +4117,8 @@ def mysql_family_outage_case(context: LabContext, scenario_id: str, seconds: int
     before = context.local.run("sudo du -sb /var/lib/log-collector/disk_buffer 2>/dev/null || echo '0 missing'", timeout=30)
     commands.append(before)
     if context.journal:
-        context.journal.add({"id": recovery_id, "scope": "receiver", "command": "systemctl start rsyslog", "sudo": True, "timeout": 60})
-    stop = context.receiver.run("systemctl stop rsyslog", sudo=True, timeout=30)
+        context.journal.add({"id": recovery_id, "scope": "receiver", "command": RECEIVER_START_COMMAND, "sudo": True, "timeout": 60})
+    stop = establish_receiver_outage(context)
     commands.append(stop)
     cleanup_ok = False
     try:
@@ -4080,7 +4131,7 @@ def mysql_family_outage_case(context: LabContext, scenario_id: str, seconds: int
         during = context.local.run("sudo du -sb /var/lib/log-collector/disk_buffer 2>/dev/null || echo '0 missing'; systemctl is-active log-collector", timeout=30)
         commands.append(during)
     finally:
-        restore = context.receiver.run("systemctl start rsyslog", sudo=True, timeout=60)
+        restore = restore_receiver_ingest(context)
         commands.append(restore)
         cleanup_ok = restore.returncode == 0
         if cleanup_ok and context.journal:
@@ -4227,7 +4278,7 @@ def mysql_family_large_record(context: LabContext) -> ScenarioResult:
             scenario_id="G9",
             name="Multi-megabyte database record",
             status="Inconclusive",
-            reason=f"Receiver maxDataSize is {capacity // 1024} KiB; at least {required // 1024} KiB is required before testing truncation",
+            reason=f"Receiver effective message limit is {capacity // 1024} KiB; at least {required // 1024} KiB is required before testing truncation",
             started_at=started,
             ended_at=utc_now(),
             assertions=[AssertionResult("receiver accepts the full test record", False, f"configured={configured} required_bytes={required}")],
@@ -4520,10 +4571,10 @@ def mysql_family_buffer_disk_full(context: LabContext) -> ScenarioResult:
     image = f"/tmp/lc-h11-{token}.img"
     mountpoint = "/var/lib/log-collector/disk_buffer"
     if context.journal:
-        context.journal.add({"id": f"H11-r-{token}", "scope": "receiver", "command": "systemctl start rsyslog", "sudo": True, "timeout": 60})
+        context.journal.add({"id": f"H11-r-{token}", "scope": "receiver", "command": RECEIVER_START_COMMAND, "sudo": True, "timeout": 60})
         context.journal.add({"id": f"H11-l-{token}", "scope": "local", "command": f"systemctl stop log-collector; umount {mountpoint} 2>/dev/null || true; rm -f {image}; systemctl start log-collector", "sudo": True, "timeout": 180})
     prepare = context.local.run(f"sudo systemctl stop log-collector; truncate -s 32M {shlex.quote(image)}; sudo mkfs.ext4 -q -F {shlex.quote(image)}; sudo mount -o loop {shlex.quote(image)} {mountpoint}; sudo chown log-collector:log-collector {mountpoint}; sudo systemctl start log-collector", timeout=180)
-    stop_receiver = context.receiver.run("systemctl stop rsyslog", sudo=True, timeout=30)
+    stop_receiver = establish_receiver_outage(context)
     binary = "mysql" if context.database == "mysql" else "mariadb"
     cleanup_ok = False
     try:
@@ -4533,7 +4584,7 @@ def mysql_family_buffer_disk_full(context: LabContext) -> ScenarioResult:
         logs = context.local.run("sudo journalctl -u log-collector --since '-10 minutes' --no-pager | tail -n 200", timeout=30)
         service = context.local.run("systemctl is-active log-collector", timeout=15)
     finally:
-        restore_receiver = context.receiver.run("systemctl start rsyslog", sudo=True, timeout=60)
+        restore_receiver = restore_receiver_ingest(context)
         cleanup = context.local.run(f"sudo systemctl stop log-collector; sudo umount {mountpoint}; rm -f {shlex.quote(image)}; sudo systemctl start log-collector", timeout=180)
         cleanup_ok = restore_receiver.returncode == 0 and cleanup.returncode == 0
         if cleanup_ok and context.journal:
@@ -5000,7 +5051,7 @@ def mysql_family_buffer_cap(context: LabContext) -> ScenarioResult:
     mountpoint = "/var/lib/log-collector/disk_buffer"
     before = context.local.run("curl -fsS --max-time 5 http://127.0.0.1:9100/status", timeout=15)
     prepare = context.local.run(f"sudo systemctl stop log-collector; truncate -s 600M {shlex.quote(image)}; sudo mkfs.ext4 -q -F {shlex.quote(image)}; sudo mount -o loop {shlex.quote(image)} {mountpoint}; sudo chown log-collector:log-collector {mountpoint}; sudo systemctl start log-collector", timeout=240)
-    stop_receiver = context.receiver.run("systemctl stop rsyslog", sudo=True, timeout=30)
+    stop_receiver = establish_receiver_outage(context)
     binary = "mysql" if context.database == "mysql" else "mariadb"
     cleanup_ok = False
     try:
@@ -5010,7 +5061,7 @@ def mysql_family_buffer_cap(context: LabContext) -> ScenarioResult:
         logs = context.local.run("sudo journalctl -u log-collector --since '-30 minutes' --no-pager | tail -n 300", timeout=30)
         service = context.local.run("systemctl is-active log-collector", timeout=15)
     finally:
-        restore_receiver = context.receiver.run("systemctl start rsyslog", sudo=True, timeout=60)
+        restore_receiver = restore_receiver_ingest(context)
         cleanup = context.local.run(f"sudo systemctl stop log-collector; sudo umount {mountpoint}; rm -f {shlex.quote(image)}; sudo systemctl start log-collector", timeout=240)
         cleanup_ok = restore_receiver.returncode == 0 and cleanup.returncode == 0
     def dropped(payload: str) -> int:
@@ -5215,8 +5266,8 @@ def oracle_outage_case(context: LabContext, scenario_id: str, seconds: int, buff
     before = context.local.run("sudo du -sb /var/lib/log-collector/disk_buffer 2>/dev/null || echo '0 missing'", timeout=30)
     recovery_id = f"{scenario_id}-{secrets.token_hex(5)}"
     if context.journal:
-        context.journal.add({"id": recovery_id, "scope": "receiver", "command": "systemctl start rsyslog", "sudo": True, "timeout": 60})
-    stop = context.receiver.run("systemctl stop rsyslog", sudo=True, timeout=30)
+        context.journal.add({"id": recovery_id, "scope": "receiver", "command": RECEIVER_START_COMMAND, "sudo": True, "timeout": 60})
+    stop = establish_receiver_outage(context)
     commands = [before, stop]
     cleanup_ok = False
     try:
@@ -5229,7 +5280,7 @@ def oracle_outage_case(context: LabContext, scenario_id: str, seconds: int, buff
         during = context.local.run("sudo du -sb /var/lib/log-collector/disk_buffer 2>/dev/null || echo '0 missing'; systemctl is-active log-collector", timeout=30)
         commands.append(during)
     finally:
-        restore = context.receiver.run("systemctl start rsyslog", sudo=True, timeout=60)
+        restore = restore_receiver_ingest(context)
         commands.append(restore)
         cleanup_ok = restore.returncode == 0
         if cleanup_ok and context.journal:
@@ -5803,7 +5854,7 @@ def oracle_large_record(context: LabContext) -> ScenarioResult:
             scenario_id="G9",
             name="Multi-megabyte Oracle record",
             status="Inconclusive",
-            reason=f"Receiver maxDataSize is {capacity // 1024} KiB; at least {required // 1024} KiB is required before testing truncation",
+            reason=f"Receiver effective message limit is {capacity // 1024} KiB; at least {required // 1024} KiB is required before testing truncation",
             started_at=started,
             ended_at=utc_now(),
             assertions=[AssertionResult("receiver accepts the full test record", False, f"configured={configured} required_bytes={required}")],
@@ -5838,7 +5889,7 @@ def oracle_buffer_cap(context: LabContext) -> ScenarioResult:
     path = current.stdout.strip()
     before = context.local.run("curl -fsS --max-time 5 http://127.0.0.1:9100/status", timeout=15)
     prepare = context.local.run(f"sudo systemctl stop log-collector; truncate -s 600M {shlex.quote(image)}; sudo mkfs.ext4 -q -F {shlex.quote(image)}; sudo mount -o loop {shlex.quote(image)} {mountpoint}; sudo chown log-collector:log-collector {mountpoint}; sudo systemctl start log-collector", timeout=240)
-    stop_receiver = context.receiver.run("systemctl stop rsyslog", sudo=True, timeout=30)
+    stop_receiver = establish_receiver_outage(context)
     cleanup_ok = False
     try:
         generator = context.local.run(f"PAYLOAD=$(head -c 4000 /dev/zero | tr '\\0' x); for i in $(seq -w 1 140000); do printf 'lc_oracle_h3_%s_%s\\n' \"$i\" \"$PAYLOAD\"; done | sudo tee -a {shlex.quote(path)} >/dev/null", timeout=1800) if path else current
@@ -5847,7 +5898,7 @@ def oracle_buffer_cap(context: LabContext) -> ScenarioResult:
         logs = context.local.run("sudo journalctl -u log-collector --since '-30 minutes' --no-pager | tail -n 300", timeout=30)
         service = context.local.run("systemctl is-active log-collector", timeout=15)
     finally:
-        restore_receiver = context.receiver.run("systemctl start rsyslog", sudo=True, timeout=60)
+        restore_receiver = restore_receiver_ingest(context)
         cleanup = context.local.run(f"sudo systemctl stop log-collector; sudo umount {mountpoint}; rm -f {shlex.quote(image)}; sudo systemctl start log-collector", timeout=240)
         cleanup_ok = restore_receiver.returncode == 0 and cleanup.returncode == 0
     def dropped(payload: str) -> int:
@@ -6237,7 +6288,7 @@ def oracle_buffer_disk_full(context: LabContext) -> ScenarioResult:
     current = context.local.run(f"find {shlex.quote(trace)} -maxdepth 1 -type f -name 'alert_*.log' -print -quit", timeout=15) if trace else paths_result
     path = current.stdout.strip()
     prepare = context.local.run(f"sudo systemctl stop log-collector; truncate -s 32M {shlex.quote(image)}; sudo mkfs.ext4 -q -F {shlex.quote(image)}; sudo mount -o loop {shlex.quote(image)} {mountpoint}; sudo chown log-collector:log-collector {mountpoint}; sudo systemctl start log-collector", timeout=180)
-    stop_receiver = context.receiver.run("systemctl stop rsyslog", sudo=True, timeout=30)
+    stop_receiver = establish_receiver_outage(context)
     cleanup_ok = False
     try:
         generator = context.local.run(f"PAYLOAD=$(head -c 4000 /dev/zero | tr '\\0' x); for i in $(seq -w 1 20000); do printf 'lc_oracle_h11_%s_%s\\n' \"$i\" \"$PAYLOAD\"; done | sudo tee -a {shlex.quote(path)} >/dev/null", timeout=900) if path else current
@@ -6246,7 +6297,7 @@ def oracle_buffer_disk_full(context: LabContext) -> ScenarioResult:
         logs = context.local.run("sudo journalctl -u log-collector --since '-10 minutes' --no-pager | tail -n 200", timeout=30)
         service = context.local.run("systemctl is-active log-collector", timeout=15)
     finally:
-        restore_receiver = context.receiver.run("systemctl start rsyslog", sudo=True, timeout=60)
+        restore_receiver = restore_receiver_ingest(context)
         cleanup = context.local.run(f"sudo systemctl stop log-collector; sudo umount {mountpoint}; rm -f {shlex.quote(image)}; sudo systemctl start log-collector", timeout=180)
         cleanup_ok = restore_receiver.returncode == 0 and cleanup.returncode == 0
     assertions = [
