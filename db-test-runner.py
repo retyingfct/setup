@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.5-draft"
+VERSION = "0.4.6-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -3030,7 +3030,10 @@ def pg_encrypted_config(context: LabContext) -> ScenarioResult:
 
 def pg_setup_non_root(context: LabContext) -> ScenarioResult:
     started = utc_now()
-    attempt = context.local.run("timeout 20 log-collector setup </dev/null", timeout=30)
+    attempt = context.local.run(
+        "set -o pipefail; timeout -k 2s 5s log-collector setup </dev/null 2>&1 | head -c 65536",
+        timeout=10,
+    )
     clear = bool(re.search(r"permission|root|administrator|privilege|access", f"{attempt.stdout}\n{attempt.stderr}", re.I))
     assertions = [
         AssertionResult("non-root setup refused", attempt.returncode != 0, command_fact(attempt)),
