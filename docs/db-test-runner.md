@@ -7,29 +7,29 @@
 Use Bash process substitution so interactive prompts continue reading from the terminal:
 
 ```bash
-python3 <(curl -fsSL https://raw.githubusercontent.com/retyingfct/setup/main/db-test-runner.py) run --database postgresql
+python3 <(curl -fsSL https://raw.githubusercontent.com/retyingfct/setup/main/db-test-runner.py) run
 ```
 
-Supported database arguments are `postgresql`, `mysql`, `mariadb`, and `oracle`.
+The runner displays a numbered menu for PostgreSQL, MySQL, MariaDB, and Oracle. The optional `--database` argument can still select an engine directly.
 
 ## Commands
 
 Check readiness without changing the endpoint:
 
 ```bash
-python3 db-test-runner.py status --database postgresql
+python3 db-test-runner.py status
 ```
 
 Offer interactive package preparation when the selected database is missing:
 
 ```bash
-python3 db-test-runner.py prepare --database postgresql
+python3 db-test-runner.py prepare
 ```
 
 Run every applicable automated scenario:
 
 ```bash
-python3 db-test-runner.py run --database postgresql
+python3 db-test-runner.py run
 ```
 
 Reproduce one scenario:
@@ -41,19 +41,19 @@ python3 db-test-runner.py run --database postgresql --scenario C5a
 Resume the latest incomplete run:
 
 ```bash
-python3 db-test-runner.py run --database postgresql --resume
+python3 db-test-runner.py run --resume
 ```
 
 Apply pending recovery actions after an interrupted configuration-changing scenario:
 
 ```bash
-python3 db-test-runner.py restore --database postgresql
+python3 db-test-runner.py restore
 ```
 
 Disruptive receiver/database outage cases are skipped unless enabled:
 
 ```bash
-python3 db-test-runner.py run --database postgresql --include-disruptive
+python3 db-test-runner.py run --include-disruptive
 ```
 
 Destructive cases are excluded by default and require `--include-destructive`.

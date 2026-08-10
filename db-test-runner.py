@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.1.0-draft"
+VERSION = "0.1.1-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -1706,8 +1706,32 @@ class EvidenceRun:
         atomic_write(self.run_dir / "SHA256SUMS", "\n".join(lines) + "\n")
 
 
-def add_database_argument(parser: argparse.ArgumentParser, required: bool = True) -> None:
+def add_database_argument(parser: argparse.ArgumentParser, required: bool = False) -> None:
     parser.add_argument("--database", choices=DATABASES, required=required)
+
+
+def prompt_database(
+    input_fn: Callable[[str], str] = input,
+    print_fn: Callable[[str], Any] = print,
+) -> str:
+    labels = {
+        "postgresql": "PostgreSQL",
+        "mysql": "MySQL",
+        "mariadb": "MariaDB",
+        "oracle": "Oracle",
+    }
+    print_fn("\nSelect the database to test:")
+    for index, database in enumerate(DATABASES, start=1):
+        print_fn(f"  {index}) {labels[database]}")
+    while True:
+        selection = input_fn("Database [1-4]: ").strip().lower()
+        if selection.isdigit():
+            index = int(selection)
+            if 1 <= index <= len(DATABASES):
+                return DATABASES[index - 1]
+        if selection in DATABASES:
+            return selection
+        print_fn("Invalid selection. Enter 1-4 or a database name.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1740,6 +1764,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.database is None:
+        try:
+            args.database = prompt_database()
+        except (EOFError, KeyboardInterrupt):
+            print("\nDatabase selection cancelled.", file=sys.stderr)
+            return 130
     with RunnerLock():
         if args.command == "status":
             return command_status(args.database)
