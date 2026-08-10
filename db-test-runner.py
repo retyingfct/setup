@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.2-draft"
+VERSION = "0.4.3-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -6758,13 +6758,13 @@ def resolve_execution_policy(
     include_destructive = bool(getattr(args, "include_destructive", False))
     if safe_only and (include_disruptive or include_destructive):
         raise RuntimeError("--safe-only cannot be combined with disruptive or destructive options")
-    if not safe_only and not include_disruptive and not include_destructive:
-        include_disruptive = input_fn(
-            "Include disruptive scenarios such as service/database outages? [y/N]: "
-        ).strip().lower() in {"y", "yes"}
+    if safe_only:
+        return ExecutionPolicy(False, False)
+    if not include_disruptive and not include_destructive:
         include_destructive = input_fn(
             "Include destructive scenarios on a dedicated cloned VM? [y/N]: "
         ).strip().lower() in {"y", "yes"}
+    include_disruptive = True
     if include_destructive:
         print_fn(f"Destructive target hostname: {hostname}")
         print_fn("WARNING: continue only inside the dedicated cloned client VM, never the original client.")
