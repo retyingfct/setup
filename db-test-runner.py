@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.9-draft"
+VERSION = "0.4.10-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -3382,7 +3382,7 @@ def shared_engine_scenarios() -> list[Scenario]:
 def mysql_family_cli(context: LabContext, sql: str, timeout: float = 60) -> CommandResult:
     binary = "mysql" if context.database == "mysql" else "mariadb"
     return context.local.run(
-        f"sudo {binary} --batch --raw --skip-column-names -e {shlex.quote(sql)}",
+        f"sudo {binary} --batch --raw --skip-column-names --comments -e {shlex.quote(sql)}",
         timeout=timeout,
     )
 
