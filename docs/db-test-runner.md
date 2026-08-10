@@ -1,106 +1,51 @@
 # Database Test Runner
 
-`db-test-runner.py` runs on the Ubuntu database endpoint and coordinates receiver validation over password-authenticated SSH. Run it as the normal endpoint user, not with `sudo`.
-
-## Run from GitHub
-
-Use Bash process substitution so interactive prompts continue reading from the terminal:
-
-```bash
-python3 <(curl -fsSL https://raw.githubusercontent.com/retyingfct/setup/main/db-test-runner.py) run
-```
-
-The runner displays a numbered menu for PostgreSQL, MySQL, MariaDB, and Oracle. The optional `--database` argument can still select an engine directly.
-
-## Commands
-
-Check readiness without changing the endpoint:
+Run `db-test-runner.py` as the normal Ubuntu endpoint user, not with `sudo`.
 
 ```bash
 python3 db-test-runner.py status
 ```
 
-Offer interactive package preparation when the selected database is missing:
+Inspect actual automation coverage without connecting to the lab:
+
+```bash
+python3 db-test-runner.py coverage --database postgresql
+```
 
 ```bash
 python3 db-test-runner.py prepare
 ```
 
-Run every applicable automated scenario:
-
 ```bash
 python3 db-test-runner.py run
 ```
 
-Reproduce one scenario:
+When `--database` is omitted, the runner displays a numbered PostgreSQL, MySQL, MariaDB, and Oracle menu. `--database postgresql` remains available for non-interactive selection.
 
-```bash
-python3 db-test-runner.py run --database postgresql --scenario C5a
-```
+The runner prompts for the receiver IP/hostname, SSH username/password, and receiver sudo password. Credentials remain in memory and are redacted from evidence. Password SSH requires `python3-paramiko`.
 
-Resume the latest incomplete run:
+Evidence is written to `evidence/<database>/<run-id>/`. Resume an interrupted run with:
 
 ```bash
 python3 db-test-runner.py run --resume
 ```
 
-Apply pending recovery actions after an interrupted configuration-changing scenario:
+Run one scenario when reproducing a result:
 
 ```bash
-python3 db-test-runner.py restore
+python3 db-test-runner.py run --database postgresql --scenario C5a
 ```
 
-Disruptive receiver/database outage cases are skipped unless enabled:
+Disruptive cases such as receiver or database outages are skipped unless explicitly enabled:
 
 ```bash
 python3 db-test-runner.py run --include-disruptive
 ```
 
-Destructive cases are excluded by default and require `--include-destructive`.
+Destructive cases remain skipped by default. With no risk flags, the runner asks whether to include disruptive and destructive cases; destructive approval requires typing `CLONE`. Non-interactive clone execution requires `--include-destructive --confirm-clone`. The constrained lab uses five-minute stability/outage windows; reports record the shorter duration against the upstream specification.
 
-## Interactive connection
+Version `0.4.0-draft` contains all 400 management rows. Executable adapters are PostgreSQL 90/102, MySQL 90/107, MariaDB 75/91, and Oracle 80/100. Every other row is explicitly classified as environment-dependent, manual, or not applicable; no row remains generic pending work. Implemented adapters are not test results: only an actual evidence run can mark a scenario Pass or Fail.
 
-The runner prompts for:
-
-- Receiver IP address or hostname
-- Receiver SSH port and username
-- Receiver SSH password
-- Receiver sudo password, with an option to reuse the SSH password
-
-Credentials remain in memory and are redacted from evidence. The script checks for `python3-paramiko`; if absent, it simulates the APT operation and asks before installation. SSH host keys require explicit trust on first connection.
-
-## Workflow and safeguards
-
-The client database and collector are tested locally. Receiver evidence is queried through SSH under `/var/log/clients/<client-hostname>/<source>.log`.
-
-Before testing, the runner verifies Ubuntu resources, the selected database, `log-collector`, its health endpoint, receiver rsyslog, RELP port `2514`, and receiver storage. Tests run sequentially for low-memory lab endpoints.
-
-Configuration-changing scenarios record restoration actions before making changes and restore values in `finally` cleanup. Receiver outage tests schedule an independent rsyslog recovery before stopping the service. Product failures do not stop later scenarios; infrastructure failures are reported as `Inconclusive`.
-
-The constrained lab uses five-minute B4 stability and B5 outage windows. A successful five-minute run is treated as Pass by the approved lab methodology, while evidence records the difference from the upstream duration.
-
-## Evidence
-
-Evidence is stored beneath the directory where the runner is launched:
-
-```text
-evidence/<database>/<run-id>/
-├── environment.json
-├── results.tsv
-├── run-summary.md
-├── SHA256SUMS
-└── scenarios/<scenario-id>/
-    ├── result.json
-    ├── commands.log
-    └── command-*.json
-```
-
-Statuses are `Pass`, `Fail`, `Not Tested`, `Inconclusive`, and `Cleanup Failed`. Unique run markers prevent earlier receiver records from causing false passes. Disposable secrets used for redaction testing are removed from stored output.
-
-## Current automation scope
-
-The script includes every applicable management scenario ID: PostgreSQL 102, MySQL 107, MariaDB 91, and Oracle 100. PostgreSQL core scenarios are executable. MySQL, MariaDB, and Oracle currently have readiness and catalog support; scenarios without a safe executable adapter are explicitly recorded as `Not Tested`, never omitted or reported as passing.
-
-MySQL and MariaDB must be tested from separate VMware snapshot states. The runner will not uninstall one engine to replace the other. Oracle installation remains manual because its media, licensing, edition, SID, and filesystem layout are site-specific.
+For destructive scenarios, manually create and boot a full dedicated clone of the Ubuntu client, then run this same runner inside the clone. The script does not control VMware or create nested VMs. Do not run destructive scenarios on the original client VM. Oracle installation remains manual because media, licensing, edition, SID, and layout are site-specific.
 
 Copyright © Forensic CyberTech Pvt. Ltd.
