@@ -58,6 +58,8 @@ Version `0.4.33-draft` supersedes `0.4.32-draft` for MySQL-family H3/H11 by sett
 
 Version `0.4.34-draft` supersedes `0.4.33-draft` for MariaDB F2 by temporarily relaxing a lab profile's permanent `server_audit` load option, journaling the original profile restoration, and restarting MariaDB before and after the missing-plugin probe. All 87 local harness tests pass.
 
+Version `0.4.35-draft` supersedes `0.4.34-draft` for PostgreSQL G3a and G10 by modifying active PostgreSQL-owned log files through the `postgres` account. This avoids a false harness failure on endpoints where a root shell may create files in `/var/log/postgresql` but cannot modify the active PostgreSQL log under the effective security policy.
+
 For destructive scenarios, manually create and boot a full dedicated clone of the Ubuntu client, then run this same runner inside the clone. The script does not control VMware or create nested VMs. Do not run destructive scenarios on the original client VM. Oracle installation remains manual because media, licensing, edition, SID, and layout are site-specific. The current Oracle adapter targets a native host installation; it does not execute through Docker or translate container ADR/audit paths to host bind mounts.
 
 Copyright © Forensic CyberTech Pvt. Ltd.

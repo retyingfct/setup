@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.34-draft"
+VERSION = "0.4.35-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -1652,7 +1652,7 @@ def pg_copytruncate_rotation(context: LabContext) -> ScenarioResult:
     path = current.stdout.strip()
     backup = f"/tmp/lc-g3a-{secrets.token_hex(5)}.log"
     truncate = context.local.run(
-        f"sudo cp --preserve=all -- {shlex.quote(path)} {shlex.quote(backup)} && sudo truncate -s 0 -- {shlex.quote(path)}",
+        f"sudo cp --preserve=all -- {shlex.quote(path)} {shlex.quote(backup)} && sudo -u postgres truncate -s 0 -- {shlex.quote(path)}",
         timeout=60,
     ) if path else context.local.run("false", timeout=5)
     commands.extend([current, truncate, postgres_comment(context, after)])
@@ -1775,7 +1775,7 @@ def pg_malformed_record(context: LabContext) -> ScenarioResult:
     path = current.stdout.strip()
     malformed = f"{{not-valid-json,marker:{marker}}}"
     append = context.local.run(
-        f"printf '%s\\n' {shlex.quote(malformed)} | sudo tee -a -- {shlex.quote(path)} >/dev/null",
+        f"printf '%s\\n' {shlex.quote(malformed)} | sudo -u postgres tee -a -- {shlex.quote(path)} >/dev/null",
         timeout=30,
     ) if path else context.local.run("false", timeout=5)
     received = context.receiver_grep(marker, timeout=60)
