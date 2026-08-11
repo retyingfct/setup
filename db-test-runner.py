@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.15-draft"
+VERSION = "0.4.16-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -4762,20 +4762,20 @@ def mysql_relative_log(context: LabContext) -> ScenarioResult:
 def mysql_include_directives(context: LabContext) -> ScenarioResult:
     started = utc_now()
     token = secrets.token_hex(5)
-    main = "/etc/mysql/my.cnf"
+    main = "/etc/mysql/mysql.cnf"
     include_file = f"/tmp/lc-d1b-{token}.cnf"
     include_dir = f"/tmp/lc-d1b-{token}.d"
     included = f"{include_dir}/included.cnf"
     backup = f"/tmp/lc-d1b-{token}.my.cnf"
     recovery_id = f"D1b-{token}"
-    recovery = f"cp -a {backup} {main}; rm -rf {include_file} {include_dir} {backup}; systemctl restart mysql"
+    recovery = f"cp -a {backup} {main}; systemctl restart mysql && rm -rf {include_file} {include_dir} {backup}"
     if context.journal:
         context.journal.add({"id": recovery_id, "scope": "local", "command": recovery, "sudo": True, "timeout": 180})
     prepare = context.local.run(
         f"sudo cp -a {main} {backup}; sudo install -d {include_dir}; "
-        f"printf %s {shlex.quote('[mysqld]\\nslow_query_log=ON\\nslow_query_log_file=/var/log/mysql/lc-d1b-file.log\\n')} | sudo tee {include_file} >/dev/null; "
-        f"printf %s {shlex.quote('[mysqld]\\ngeneral_log_file=/var/log/mysql/lc-d1b-dir.log\\n')} | sudo tee {included} >/dev/null; "
-        f"printf %s {shlex.quote(f'\\n!include {include_file}\\n!includedir {include_dir}\\n')} | sudo tee -a {main} >/dev/null; "
+        f"printf '%b' {shlex.quote('[mysqld]\\nslow_query_log=ON\\nslow_query_log_file=/var/log/mysql/lc-d1b-file.log\\n')} | sudo tee {include_file} >/dev/null; "
+        f"printf '%b' {shlex.quote('[mysqld]\\ngeneral_log_file=/var/log/mysql/lc-d1b-dir.log\\n')} | sudo tee {included} >/dev/null; "
+        f"printf '%b' {shlex.quote(f'\\n!include {include_file}\\n!includedir {include_dir}\\n')} | sudo tee -a {main} >/dev/null; "
         "sudo systemctl restart mysql",
         timeout=180,
     )
