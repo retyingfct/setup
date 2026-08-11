@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.13-draft"
+VERSION = "0.4.14-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -6686,14 +6686,26 @@ def command_prepare(database: str) -> int:
             context.receiver.close()
 
 
+def select_requested_scenarios(database: str, value: str | None) -> list[Scenario]:
+    catalog = scenario_catalog(database)
+    if not value:
+        return catalog
+    requested = [item.strip().lower() for item in value.split(",") if item.strip()]
+    by_id = {item.scenario_id.lower(): item for item in catalog}
+    unknown = [item for item in requested if item not in by_id]
+    if unknown:
+        raise ValueError(f"Unknown scenario(s) {', '.join(unknown)} for {database}.")
+    return [by_id[item] for item in requested]
+
+
 def command_run(args: argparse.Namespace) -> int:
     if os.geteuid() == 0:
         print("Run db-test-runner.py as the normal endpoint user, not with sudo.", file=sys.stderr)
         return 3
-    if args.scenario and args.scenario.lower() not in {
-        item.scenario_id.lower() for item in scenario_catalog(args.database)
-    }:
-        print(f"Unknown scenario {args.scenario!r} for {args.database}.", file=sys.stderr)
+    try:
+        selected_scenarios = select_requested_scenarios(args.database, args.scenario)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
         return 2
     try:
         policy = resolve_execution_policy(args, hostname=socket.gethostname().split(".", 1)[0])
@@ -6736,14 +6748,10 @@ def command_run(args: argparse.Namespace) -> int:
             print(f"Evidence: {evidence.run_dir}")
             return 4
 
-        scenarios = scenario_catalog(args.database)
         if args.scenario:
-            scenarios = [item for item in scenarios if item.scenario_id.lower() == args.scenario.lower()]
-            if not scenarios:
-                evidence.finalize("Aborted - Unknown Scenario")
-                print(f"Unknown scenario {args.scenario!r} for {args.database}.", file=sys.stderr)
-                return 2
+            scenarios = selected_scenarios
         elif args.resume:
+            scenarios = selected_scenarios
             completed = {
                 result.scenario_id
                 for result in evidence.results
@@ -6751,6 +6759,8 @@ def command_run(args: argparse.Namespace) -> int:
             }
             scenarios = [item for item in scenarios if item.scenario_id not in completed]
             print(f"Resuming {evidence.run_id}; {len(completed)} completed scenario(s) skipped.")
+        else:
+            scenarios = selected_scenarios
         results = ScenarioOrchestrator(policy, evidence, context).run(scenarios)
         evidence.finalize()
         totals = {status: sum(result.status == status for result in results) for status in STATUSES}
@@ -7193,7 +7203,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="Run all applicable automated scenarios")
     add_database_argument(run_parser)
-    run_parser.add_argument("--scenario", help="Run one scenario for reproduction")
+    run_parser.add_argument("--scenario", help="Run one scenario or a comma-separated ordered list")
     run_parser.add_argument("--resume", action="store_true", help="Resume the newest incomplete run")
     run_parser.add_argument("--include-disruptive", action="store_true")
     run_parser.add_argument("--include-destructive", action="store_true")
