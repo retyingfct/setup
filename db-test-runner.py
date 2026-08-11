@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.26-draft"
+VERSION = "0.4.27-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -2803,11 +2803,12 @@ def complete_setup_wizard(
         r"(?i)(?:(?:enable|collect|configure|include|add)[^\r\n]*mariadb|mariadb[^\r\n]*(?:enable|collect|configure|include|add))[^\r\n]*[?:›]\s*$",
         r"(?i)(?:(?:enable|collect|configure|include|add)[^\r\n]*(?:mysql|oracle|mongo)|(?:mysql|oracle|mongo)[^\r\n]*(?:enable|collect|configure|include|add))[^\r\n]*[?:›]\s*$",
         r"(?i)(?:output\s*)?transport[^\r\n]*[?:›]\s*$",
-        r"(?i)(?:(?:receiver|destination|output)[^\r\n]*)?(?:host|address|server)[^\r\n]*[?:›]\s*$",
+        r"(?i)(?:(?:receiver|destination|output)[^\r\n]*)?(?:host|address|server)[^\r\n]*[?:›]\s*(?:\([^)]*required[^)]*\))?\s*$",
         r"(?i)(?:receiver|destination|output)?\s*port[^\r\n]*[?:›]\s*$",
         r"(?i)tls[^\r\n]*[?:›]\s*$",
         r"(?i)(?:portal|management)[^\r\n]*url[^\r\n]*[?:›]\s*$",
-        r"(?i)(?:updat|github|pat|repository|asset|interval)[^\r\n]*[?:›]\s*$",
+        r"(?i)(?:github\s+)?pat[^\r\n]*[?:›]\s*$",
+        r"(?i)(?:updat|github|repository|asset|interval)[^\r\n]*[?:›]\s*$",
         r"(?i)(?:write|generate|save|confirm)[^\r\n]*(?:config|configuration)?[^\r\n]*[?:›]\s*$",
         r"(?m)[^\r\n]{2,}[?:›]\s*$",
         pexpect.EOF,
@@ -2849,13 +2850,17 @@ def complete_setup_wizard(
                 child.sendline("2514")
             elif index == 12:
                 child.sendline("n")
-            elif index in {13, 14}:
+            elif index == 13:
                 child.sendline("")
+            elif index == 14:
+                child.sendline("github_pat_lc_disposable_test")
             elif index == 15:
-                child.sendline("y")
-            elif index == 16:
                 child.sendline("")
+            elif index == 16:
+                child.sendline("y")
             elif index == 17:
+                child.sendline("")
+            elif index == 18:
                 child.close()
                 code = child.exitstatus if child.exitstatus is not None else 0
                 result = CommandResult("sudo log-collector setup [automated profile]", code, transcript, "", started_at, utc_now())
