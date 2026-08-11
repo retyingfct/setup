@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.29-draft"
+VERSION = "0.4.30-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -3403,7 +3403,7 @@ def mysql_family_cli(context: LabContext, sql: str, timeout: float = 60) -> Comm
 
 
 def mysql_family_marker(context: LabContext, marker: str) -> CommandResult:
-    prefix = "SET SESSION long_query_time=0; " if context.database == "mysql" else ""
+    prefix = "SET SESSION long_query_time=0; " if context.database in {"mysql", "mariadb"} else ""
     sql = f"{prefix}SELECT /*{marker}*/ SLEEP(0.2) AS lc_marker;"
     return mysql_family_cli(context, sql, timeout=30)
 
