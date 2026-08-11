@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.30-draft"
+VERSION = "0.4.31-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -3517,7 +3517,7 @@ def mysql_family_unicode(context: LabContext) -> ScenarioResult:
     started = utc_now()
     marker = context.marker("G6")
     value = f"{marker}_日本語_العربية_😀"
-    trigger = mysql_family_cli(context, f"SELECT /*{value}*/ 1;")
+    trigger = mysql_family_cli(context, f"SET SESSION long_query_time=0; SELECT /*{value}*/ SLEEP(0.2);")
     received = context.receiver_grep(marker, timeout=90)
     assertions = [
         AssertionResult("Unicode query generated", trigger.returncode == 0, command_fact(trigger)),
@@ -4016,7 +4016,7 @@ def mariadb_audit_retcode(context: LabContext) -> ScenarioResult:
     started = utc_now()
     marker = context.marker("F5d")
     commands, state = mariadb_prepare_audit(context)
-    trigger = mysql_family_cli(context, f"SELECT /*{marker}*/ * FROM lc_runner_missing_table;")
+    trigger = mysql_family_cli(context, f"CREATE DATABASE IF NOT EXISTS log_collector_test; USE log_collector_test; SELECT /*{marker}*/ * FROM lc_runner_missing_table;")
     received = context.receiver_grep(marker, timeout=90)
     restore = mariadb_restore_audit(context, state)
     commands.extend([trigger, received, restore])
@@ -4033,7 +4033,7 @@ def mariadb_audit_event_kinds(context: LabContext) -> ScenarioResult:
     marker = context.marker("F5e")
     username = f"lc_f5e_{secrets.token_hex(4)}"
     commands, state = mariadb_prepare_audit(context)
-    trigger = mysql_family_cli(context, f"CREATE USER '{username}'@'localhost'; CREATE TABLE {marker}(id INT); INSERT INTO {marker} VALUES (1); SELECT /*{marker}*/ * FROM {marker}; DROP TABLE {marker}; DROP USER '{username}'@'localhost';")
+    trigger = mysql_family_cli(context, f"CREATE DATABASE IF NOT EXISTS log_collector_test; USE log_collector_test; CREATE USER '{username}'@'localhost'; CREATE TABLE {marker}(id INT); INSERT INTO {marker} VALUES (1); SELECT /*{marker}*/ * FROM {marker}; DROP TABLE {marker}; DROP USER '{username}'@'localhost';")
     received = context.receiver_grep(marker, timeout=90)
     user_received = context.receiver_grep(username, timeout=30)
     restore = mariadb_restore_audit(context, state)
@@ -4222,7 +4222,7 @@ def mysql_family_buffer_growth(context: LabContext) -> ScenarioResult:
 
 
 def mysql_family_buffer_delivery(context: LabContext) -> ScenarioResult:
-    return mysql_family_outage_case(context, "H2", 30, True, True)
+    return mysql_family_outage_case(context, "H2", 30, False, True)
 
 
 def mysql_family_rapid_rotation(context: LabContext) -> ScenarioResult:
