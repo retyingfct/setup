@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.28-draft"
+VERSION = "0.4.29-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -2912,11 +2912,16 @@ def pg_multi_engine_setup(context: LabContext) -> ScenarioResult:
     )
     dependency, wizard = complete_setup_wizard(context, engines={"postgresql", "mariadb"})
     check = context.local.run("sudo log-collector check", timeout=30)
-    restart = context.local.run("sudo systemctl restart log-collector; sleep 5; sudo journalctl -u log-collector --since '-3 minutes' --no-pager | tail -n 200", timeout=90)
+    restart = context.local.run(
+        "sudo systemctl restart log-collector; sleep 5; "
+        "pid=$(systemctl show -p MainPID --value log-collector); "
+        "sudo sh -c 'for fd in /proc/$1/fd/*; do readlink \"$fd\"; done' sh \"$pid\"",
+        timeout=90,
+    )
     restore = restore_collector_configuration(context, config, backup)
     stop_maria = context.local.run("sudo systemctl stop mariadb", timeout=60)
     transcript_engines = "postgres" in wizard.stdout.lower() and "mariadb" in wizard.stdout.lower()
-    startup_engines = "postgres_log" in restart.stdout and "mariadb_log" in restart.stdout
+    startup_engines = "/var/log/postgresql/" in restart.stdout and "/var/log/mysql/" in restart.stdout
     assertions = [
         AssertionResult("MariaDB package prepared", simulation.returncode == 0 and install.returncode == 0, f"simulate={simulation.returncode} install={install.returncode}"),
         AssertionResult("MariaDB audit source prepared", audit.returncode == 0, command_fact(audit)),
@@ -4707,14 +4712,19 @@ def mysql_family_multi_engine_setup(context: LabContext) -> ScenarioResult:
     pg_logging = context.local.run("sudo -u postgres psql -v ON_ERROR_STOP=1 -c \"ALTER SYSTEM SET logging_collector='on';\" -c \"ALTER SYSTEM SET log_destination='jsonlog';\" -c \"ALTER SYSTEM SET log_statement='all';\"; sudo systemctl restart postgresql; sudo setfacl -Rm u:log-collector:rX /var/log/postgresql", timeout=240)
     dependency, wizard = complete_setup_wizard(context, engines={context.database, "postgresql"})
     check = context.local.run("sudo log-collector check", timeout=30)
-    restart = context.local.run("sudo systemctl restart log-collector; sleep 5; sudo journalctl -u log-collector --since '-3 minutes' --no-pager | tail -n 200", timeout=90)
+    restart = context.local.run(
+        "sudo systemctl restart log-collector; sleep 5; "
+        "pid=$(systemctl show -p MainPID --value log-collector); "
+        "sudo sh -c 'for fd in /proc/$1/fd/*; do readlink \"$fd\"; done' sh \"$pid\"",
+        timeout=90,
+    )
     restore = restore_collector_configuration(context, config, backup)
     assertions = [
         AssertionResult("PostgreSQL package prepared", simulation.returncode == 0 and install.returncode == 0, f"simulate={simulation.returncode} install={install.returncode}"),
         AssertionResult("PostgreSQL logging prepared", pg_logging.returncode == 0, command_fact(pg_logging)),
         AssertionResult("wizard completed both engine sections", wizard.returncode == 0 and "postgres" in wizard.stdout.lower() and context.database in wizard.stdout.lower(), command_fact(wizard)),
         AssertionResult("multi-engine config valid", check.returncode == 0, command_fact(check)),
-        AssertionResult("both inputs started", "postgres_log" in restart.stdout and f"{context.database}_log" in restart.stdout, command_fact(restart)),
+        AssertionResult("both inputs started", "/var/log/postgresql/" in restart.stdout and "/var/log/mysql/" in restart.stdout, command_fact(restart)),
     ]
     return evaluated_result("A11", "Two engines in one setup", started, [locate, backup_result, simulation, install, pg_logging, dependency, wizard, check, restart, restore], assertions, "Wizard configured PostgreSQL and the selected MySQL-family engine together", "Passed" if restore.returncode == 0 else "Failed")
 
