@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.21-draft"
+VERSION = "0.4.22-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -4817,6 +4817,9 @@ def mysql_remote_auth_probe(context: LabContext, scenario_id: str, block_host: b
     client_ip = client_ip_result.stdout.strip()
     receiver_ip_result = context.local.run(f"getent ahostsv4 {shlex.quote(context.receiver.config.host)} | awk 'NR==1 {{print $1}}'", timeout=15)
     receiver_ip = receiver_ip_result.stdout.strip()
+    receiver_client = context.receiver.run("command -v mysql", timeout=15)
+    if receiver_client.returncode != 0:
+        raise RuntimeError("D2b/D2c require mysql-client-core-8.0 on the receiver")
     firewall_add = f"iptables -I INPUT -p tcp -s {receiver_ip} --dport 3306 -j ACCEPT"
     firewall_del = f"iptables -D INPUT -p tcp -s {receiver_ip} --dport 3306 -j ACCEPT"
     recovery_id = f"{scenario_id}-{token}"
@@ -4834,20 +4837,18 @@ def mysql_remote_auth_probe(context: LabContext, scenario_id: str, block_host: b
         configure = mysql_family_cli(context, "SET GLOBAL max_connect_errors=3; FLUSH HOSTS;")
     else:
         configure = old_max
-    # Standard-library-only MySQL protocol probe: receive the handshake, then
-    # either disconnect repeatedly or submit an invalid Protocol 4.1 response.
-    remote_code = (
-        "import socket,struct,time\n"
-        f"h={client_ip!r};u={username!r}\n"
-        "def packet(auth):\n"
-        " s=socket.create_connection((h,3306),5);hdr=s.recv(4);n=int.from_bytes(hdr[:3],'little');s.recv(n)\n"
-        " if not auth:s.close();return b''\n"
-        " p=struct.pack('<IIB23s',0x00088205,16777216,45,b'')+u.encode()+b'\\0'+bytes([20])+bytes(20)+b'mysql_native_password\\0'\n"
-        " s.sendall(len(p).to_bytes(3,'little')+b'\\x01'+p);r=s.recv(4096);s.close();return r\n"
-        + ("[packet(False) for _ in range(6)];time.sleep(1)\n" if block_host else "")
-        + "print(packet(True).decode('latin1','replace'))\n"
+    disconnect_code = (
+        "import socket,time\n"
+        f"h={client_ip!r}\n"
+        "for _ in range(6):\n"
+        " s=socket.create_connection((h,3306),5);hdr=s.recv(4);n=int.from_bytes(hdr[:3],'little');s.recv(n);s.close()\n"
+        "time.sleep(1)\n"
     )
-    remote = context.receiver.run(f"python3 -c {shlex.quote(remote_code)}", timeout=60)
+    prelude = f"python3 -c {shlex.quote(disconnect_code)}; " if block_host else ""
+    remote = context.receiver.run(
+        prelude + f"mysql --protocol=TCP -h {shlex.quote(client_ip)} -P 3306 -u {shlex.quote(username)} --password=unused --connect-timeout=5 -e 'SELECT 1' 2>&1",
+        timeout=60,
+    )
     received = context.receiver_grep(username, timeout=90)
     old_match = re.findall(r"\d+", old_max.stdout)
     restore_max = mysql_family_cli(context, f"SET GLOBAL max_connect_errors={old_match[-1] if old_match else 100}; FLUSH HOSTS; DROP USER IF EXISTS '{username}'@'10.255.255.255';")
@@ -4858,12 +4859,12 @@ def mysql_remote_auth_probe(context: LabContext, scenario_id: str, block_host: b
     expected = r"blocked|ER_HOST_IS_BLOCKED" if block_host else r"not allowed|not privileged|access denied"
     assertions = [
         AssertionResult("remote listener prepared", prepare.returncode == 0 and bool(client_ip and receiver_ip), f"client={client_ip} receiver={receiver_ip}"),
-        AssertionResult("remote rejection observed", remote.returncode == 0 and bool(re.search(expected, remote.stdout, re.I)), command_fact(remote)),
+        AssertionResult("remote rejection observed", remote.returncode != 0 and bool(re.search(expected, remote.stdout, re.I)), command_fact(remote)),
         AssertionResult("security event collected", username in received.stdout or (block_host and bool(re.search(r"blocked", received.stdout, re.I))), command_fact(received)),
         AssertionResult("warning or higher priority", bool(re.match(r"<(?:[0-9]|1[0-2])>", line)), line or "missing"),
     ]
     name = "Blocked host severity" if block_host else "Disallowed host severity"
-    return evaluated_result(scenario_id, name, started, [client_ip_result, receiver_ip_result, prepare, create, old_max, configure, remote, received, restore_max, cleanup], assertions, "Remote authentication denial was raised and collected", "Passed" if cleanup.returncode == 0 else "Failed")
+    return evaluated_result(scenario_id, name, started, [client_ip_result, receiver_ip_result, prepare, create, old_max, configure, receiver_client, remote, received, restore_max, cleanup], assertions, "Remote authentication denial was raised and collected", "Passed" if cleanup.returncode == 0 else "Failed")
 
 
 def mysql_disallowed_host(context: LabContext) -> ScenarioResult:
