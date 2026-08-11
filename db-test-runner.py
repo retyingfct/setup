@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.23-draft"
+VERSION = "0.4.24-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -4831,27 +4831,24 @@ def mysql_remote_auth_probe(context: LabContext, scenario_id: str, block_host: b
         f"sudo systemctl restart mysql; sudo {firewall_add}",
         timeout=180,
     )
-    create = mysql_family_cli(context, f"CREATE USER '{username}'@'10.255.255.255' IDENTIFIED BY 'unused';")
+    account_host = receiver_ip if block_host else "10.255.255.255"
+    create = mysql_family_cli(context, f"CREATE USER '{username}'@'{account_host}' IDENTIFIED BY 'unused';")
     old_max = mysql_family_cli(context, "SELECT @@global.max_connect_errors;")
     if block_host:
         configure = mysql_family_cli(context, "SET GLOBAL max_connect_errors=3; FLUSH HOSTS;")
     else:
         configure = old_max
-    disconnect_code = (
-        "import socket,struct,time\n"
-        f"h={client_ip!r}\n"
-        "for _ in range(10):\n"
-        " s=socket.create_connection((h,3306),5);hdr=s.recv(4);n=int.from_bytes(hdr[:3],'little');s.recv(n);s.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0));s.close()\n"
-        "time.sleep(1)\n"
+    prelude = (
+        f"for attempt in $(seq 1 10); do mysql --protocol=TCP -h {shlex.quote(client_ip)} -P 3306 -u {shlex.quote(username)} --password=wrong --connect-timeout=5 -e 'SELECT 1' >/dev/null 2>&1 || true; done; sleep 1; "
+        if block_host else ""
     )
-    prelude = f"python3 -c {shlex.quote(disconnect_code)}; " if block_host else ""
     remote = context.receiver.run(
         prelude + f"mysql --protocol=TCP -h {shlex.quote(client_ip)} -P 3306 -u {shlex.quote(username)} --password=unused --connect-timeout=5 -e 'SELECT 1' 2>&1",
         timeout=60,
     )
     received = context.receiver_grep(username, timeout=90)
     old_match = re.findall(r"\d+", old_max.stdout)
-    restore_max = mysql_family_cli(context, f"SET GLOBAL max_connect_errors={old_match[-1] if old_match else 100}; FLUSH HOSTS; DROP USER IF EXISTS '{username}'@'10.255.255.255';")
+    restore_max = mysql_family_cli(context, f"SET GLOBAL max_connect_errors={old_match[-1] if old_match else 100}; FLUSH HOSTS; DROP USER IF EXISTS '{username}'@'{account_host}';")
     cleanup = context.local.run(f"sudo bash -lc {shlex.quote(recovery)}", timeout=180)
     if cleanup.returncode == 0 and context.journal:
         context.journal.remove(recovery_id)
@@ -4860,7 +4857,7 @@ def mysql_remote_auth_probe(context: LabContext, scenario_id: str, block_host: b
     assertions = [
         AssertionResult("remote listener prepared", prepare.returncode == 0 and bool(client_ip and receiver_ip), f"client={client_ip} receiver={receiver_ip}"),
         AssertionResult("remote rejection observed", remote.returncode != 0 and bool(re.search(expected, remote.stdout, re.I)), command_fact(remote)),
-        AssertionResult("security event collected", username in received.stdout or (block_host and bool(re.search(r"blocked", received.stdout, re.I))), command_fact(received)),
+        AssertionResult("security event collected", bool(re.search(r"blocked", received.stdout, re.I)) if block_host else username in received.stdout, command_fact(received)),
         AssertionResult("warning or higher priority", bool(re.match(r"<(?:[0-9]|1[0-2])>", line)), line or "missing"),
     ]
     name = "Blocked host severity" if block_host else "Disallowed host severity"
