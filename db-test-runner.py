@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.14-draft"
+VERSION = "0.4.15-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -4887,12 +4887,15 @@ def mysql_existing_error_not_demoted(context: LabContext) -> ScenarioResult:
 
 def mysql_error_code_format(context: LabContext) -> ScenarioResult:
     result = mysql_family_auth_failure(context, "D2f", nonexistent=True)
-    line = next((item.observed for item in result.assertions if item.name == "failed login delivered"), "")
-    assertion = AssertionResult("MySQL error code preserved", bool(re.search(r"\[MY-\d+\]", line)), line or "missing")
-    result.assertions.append(assertion)
-    if not assertion.passed:
-        result.status = "Fail"
-        result.reason = "Failed assertion(s): MySQL error code preserved"
+    received = next((item.stdout for item in result.commands if item.command.startswith("receiver:")), "")
+    assertion = AssertionResult("MySQL error code preserved", bool(re.search(r"\[MY-\d+\]", received)), received or "missing")
+    result.assertions = [
+        item for item in result.assertions
+        if item.name in {"authentication rejected", "failed login delivered"}
+    ] + [assertion]
+    failed = [item.name for item in result.assertions if not item.passed]
+    result.status = "Fail" if failed else "Pass"
+    result.reason = f"Failed assertion(s): {', '.join(failed)}" if failed else "MySQL 8 error code remained visible"
     result.name = "MySQL 8 error-code format"
     return result
 
