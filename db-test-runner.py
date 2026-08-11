@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.20-draft"
+VERSION = "0.4.21-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -4518,17 +4518,28 @@ def mysql_family_symlink_log(context: LabContext) -> ScenarioResult:
     values = snapshot.stdout.strip().split("\t")[-3:]
     if len(values) != 3:
         values = ["0", "10", "/var/log/mysql/slow.log"]
+    restore_sql = f"SET GLOBAL slow_query_log=OFF; SET GLOBAL slow_query_log_file={json.dumps(values[2])}; SET GLOBAL long_query_time={values[1]}; SET GLOBAL slow_query_log={int(values[0].upper() in {'1', 'ON'})};"
+    binary = "mysql" if context.database == "mysql" else "mariadb"
+    recovery_id = f"G13-{token}"
+    recovery = f"{binary} -e {shlex.quote(restore_sql)}; rm -f -- {shlex.quote(link)} {shlex.quote(real)}; systemctl restart log-collector"
+    if context.journal:
+        context.journal.add({"id": recovery_id, "scope": "local", "command": recovery, "sudo": True, "timeout": 180})
     prepare = context.local.run(f"sudo install -o mysql -g adm -m 0640 /dev/null {shlex.quote(real)}; sudo ln -s {shlex.quote(real)} {shlex.quote(link)}; sudo setfacl -m u:log-collector:r {shlex.quote(real)}", timeout=30)
     change = mysql_family_cli(context, f"SET GLOBAL slow_query_log=OFF; SET GLOBAL slow_query_log_file={json.dumps(link)}; SET GLOBAL long_query_time=0; SET GLOBAL slow_query_log=ON;")
     trigger = mysql_family_marker(context, marker)
     received = context.receiver_grep(marker, timeout=90)
-    restore = mysql_family_cli(context, f"SET GLOBAL slow_query_log=OFF; SET GLOBAL slow_query_log_file={json.dumps(values[2])}; SET GLOBAL long_query_time={values[1]}; SET GLOBAL slow_query_log={int(values[0].upper() in {'1', 'ON'})};")
+    restore = mysql_family_cli(context, restore_sql)
     cleanup = context.local.run(f"sudo rm -f -- {shlex.quote(link)} {shlex.quote(real)}", timeout=30)
+    restart = context.local.run("sudo systemctl restart log-collector", timeout=90)
+    verify = mysql_family_cli(context, "SELECT @@global.slow_query_log,@@global.long_query_time,@@global.slow_query_log_file;")
+    restored = restore.returncode == 0 and cleanup.returncode == 0 and restart.returncode == 0 and values[2] in verify.stdout
+    if restored and context.journal:
+        context.journal.remove(recovery_id)
     assertions = [
         AssertionResult("symlinked log configured", prepare.returncode == 0 and change.returncode == 0, f"prepare={prepare.returncode} change={change.returncode}"),
         AssertionResult("event through symlink collected", marker in received.stdout, command_fact(received)),
     ]
-    return evaluated_result("G13", "Symlinked database log", started, [snapshot, prepare, change, trigger, received, restore, cleanup], assertions, "Collector followed a symlinked database log path", "Passed" if restore.returncode == 0 and cleanup.returncode == 0 else "Failed")
+    return evaluated_result("G13", "Symlinked database log", started, [snapshot, prepare, change, trigger, received, restore, cleanup, restart, verify], assertions, "Collector followed a symlinked database log path", "Passed" if restored else "Failed")
 
 
 def mysql_family_config_fallback(context: LabContext) -> ScenarioResult:
