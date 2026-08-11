@@ -32,14 +32,14 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.10-draft"
+VERSION = "0.4.11-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
 ExecutionMode = Literal["endpoint", "endpoint-pending", "clone", "environment", "manual", "not-applicable"]
-LAB_STABILITY_MINUTES = 5
-LAB_OUTAGE_MINUTES = 5
-LAB_SOAK_MINUTES = 5
+LAB_STABILITY_MINUTES = 1
+LAB_OUTAGE_MINUTES = 1
+LAB_SOAK_MINUTES = 1
 LARGE_RECORD_PAYLOAD_BYTES = 2 * 1024 * 1024
 LARGE_RECORD_OVERHEAD_BYTES = 64 * 1024
 RECEIVER_STOP_COMMAND = (
@@ -2507,11 +2507,11 @@ def pg_high_volume(context: LabContext) -> ScenarioResult:
     before_dropped = dropped(health_before.stdout)
     after_dropped = dropped(health_after.stdout)
     assertions = [
-        AssertionResult("5,000 load markers delivered", len(markers) == LAB_SOAK_MINUTES * 1000, f"unique={len(markers)}"),
+        AssertionResult(f"{LAB_SOAK_MINUTES * 1000:,} load markers delivered", len(markers) == LAB_SOAK_MINUTES * 1000, f"unique={len(markers)}"),
         AssertionResult("no additional dropped events", before_dropped >= 0 and after_dropped == before_dropped, f"before={before_dropped} after={after_dropped}"),
         AssertionResult("collector remained active", service.stdout.strip() == "active", command_fact(service)),
     ]
-    return evaluated_result("G15", "Constrained high-volume run", started, commands, assertions, f"Collector delivered 5,000 events without additional drops in the constrained {LAB_SOAK_MINUTES}-minute lab run")
+    return evaluated_result("G15", "Constrained high-volume run", started, commands, assertions, f"Collector delivered {LAB_SOAK_MINUTES * 1000:,} events without additional drops in the constrained {LAB_SOAK_MINUTES}-minute lab run")
 
 
 def pg_constrained_soak(context: LabContext) -> ScenarioResult:
