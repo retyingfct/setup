@@ -54,6 +54,8 @@ The G9 multi-megabyte test uses the lower effective value of imrelp `maxDataSize
 
 Version `0.4.32-draft` supersedes `0.4.31-draft` for MariaDB F5d by accepting the collector's rendered `rc=<number>(failure)` audit field. All 85 local harness tests pass.
 
+Version `0.4.33-draft` supersedes `0.4.32-draft` for MySQL-family H3/H11 by setting a session-local zero slow-query threshold and preserving comments during buffer-pressure generation. This ensures the generated records actually reach the collector input. All 86 local harness tests pass.
+
 For destructive scenarios, manually create and boot a full dedicated clone of the Ubuntu client, then run this same runner inside the clone. The script does not control VMware or create nested VMs. Do not run destructive scenarios on the original client VM. Oracle installation remains manual because media, licensing, edition, SID, and layout are site-specific. The current Oracle adapter targets a native host installation; it does not execute through Docker or translate container ADR/audit paths to host bind mounts.
 
 Copyright © Forensic CyberTech Pvt. Ltd.

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.32-draft"
+VERSION = "0.4.33-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -4658,7 +4658,7 @@ def mysql_family_buffer_disk_full(context: LabContext) -> ScenarioResult:
     binary = "mysql" if context.database == "mysql" else "mariadb"
     cleanup_ok = False
     try:
-        generator = context.local.run(f"PAYLOAD=$(head -c 4000 /dev/zero | tr '\\0' x); for i in $(seq -w 1 20000); do printf 'SELECT /*lc_h11_%s_%s*/ 1;\\n' \"$i\" \"$PAYLOAD\"; done | sudo {binary} --batch", timeout=900)
+        generator = context.local.run(f"PAYLOAD=$(head -c 4000 /dev/zero | tr '\\0' x); {{ printf 'SET SESSION long_query_time=0;\\n'; for i in $(seq -w 1 20000); do printf 'SELECT /*lc_h11_%s_%s*/ SLEEP(0.001);\\n' \"$i\" \"$PAYLOAD\"; done; }} | sudo {binary} --batch --comments", timeout=900)
         time.sleep(15)
         disk = context.local.run(f"df -Pk {mountpoint}; sudo du -sb {mountpoint}", timeout=30)
         logs = context.local.run("sudo journalctl -u log-collector --since '-10 minutes' --no-pager | tail -n 200", timeout=30)
@@ -5143,7 +5143,7 @@ def mysql_family_buffer_cap(context: LabContext) -> ScenarioResult:
     binary = "mysql" if context.database == "mysql" else "mariadb"
     cleanup_ok = False
     try:
-        generator = context.local.run(f"PAYLOAD=$(head -c 4000 /dev/zero | tr '\\0' x); for i in $(seq -w 1 140000); do printf 'SELECT /*lc_h3_%s_%s*/ 1;\\n' \"$i\" \"$PAYLOAD\"; done | sudo {binary} --batch", timeout=1800)
+        generator = context.local.run(f"PAYLOAD=$(head -c 4000 /dev/zero | tr '\\0' x); {{ printf 'SET SESSION long_query_time=0;\\n'; for i in $(seq -w 1 140000); do printf 'SELECT /*lc_h3_%s_%s*/ SLEEP(0.001);\\n' \"$i\" \"$PAYLOAD\"; done; }} | sudo {binary} --batch --comments", timeout=1800)
         time.sleep(20)
         after = context.local.run("curl -fsS --max-time 5 http://127.0.0.1:9100/status", timeout=15)
         logs = context.local.run("sudo journalctl -u log-collector --since '-30 minutes' --no-pager | tail -n 300", timeout=30)
