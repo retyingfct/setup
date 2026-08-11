@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.25-draft"
+VERSION = "0.4.26-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -2803,7 +2803,7 @@ def complete_setup_wizard(
         r"(?i)(?:(?:enable|collect|configure|include|add)[^\r\n]*mariadb|mariadb[^\r\n]*(?:enable|collect|configure|include|add))[^\r\n]*[?:›]\s*$",
         r"(?i)(?:(?:enable|collect|configure|include|add)[^\r\n]*(?:mysql|oracle|mongo)|(?:mysql|oracle|mongo)[^\r\n]*(?:enable|collect|configure|include|add))[^\r\n]*[?:›]\s*$",
         r"(?i)(?:output\s*)?transport[^\r\n]*[?:›]\s*$",
-        r"(?i)(?:receiver|destination|output)[^\r\n]*(?:host|address|server)[^\r\n]*[?:›]\s*$",
+        r"(?i)(?:(?:receiver|destination|output)[^\r\n]*)?(?:host|address|server)[^\r\n]*[?:›]\s*$",
         r"(?i)(?:receiver|destination|output)?\s*port[^\r\n]*[?:›]\s*$",
         r"(?i)tls[^\r\n]*[?:›]\s*$",
         r"(?i)(?:portal|management)[^\r\n]*url[^\r\n]*[?:›]\s*$",
