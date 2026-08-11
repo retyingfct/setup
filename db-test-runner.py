@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.17-draft"
+VERSION = "0.4.18-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -3140,7 +3140,7 @@ def pg_service_install_cycle(context: LabContext) -> ScenarioResult:
     install = context.local.run("sudo log-collector install", timeout=180)
     start_service = context.local.run("sudo systemctl start log-collector", timeout=60)
     active = context.local.run("systemctl is-active log-collector", timeout=15)
-    health = context.local.run("curl -fsS --max-time 10 http://127.0.0.1:9100/status", timeout=15)
+    health = context.local.run("for attempt in $(seq 1 15); do curl -fsS --max-time 2 http://127.0.0.1:9100/status && exit 0; sleep 1; done; exit 1", timeout=45)
     cleanup = context.local.run(f"sudo rm -rf -- {shlex.quote(backup)}", timeout=30)
     recovered = install.returncode == 0 and start_service.returncode == 0 and active.stdout.strip() == "active"
     if recovered and cleanup.returncode == 0 and context.journal:
