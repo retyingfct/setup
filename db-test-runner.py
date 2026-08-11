@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.11-draft"
+VERSION = "0.4.12-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -4312,6 +4312,17 @@ def mysql_family_permission_recovery(context: LabContext) -> ScenarioResult:
     return evaluated_result("G8", "Permission loss and recovery", started, [path_result, mode_result, deny, logs, service, restore_mode, trigger, received], assertions, "Collector reported the read denial, stayed active, and recovered", "Passed" if cleanup_ok else "Failed")
 
 
+def mysql_large_record_command(binary: str, prefix: str, suffix: str, payload_bytes: int) -> str:
+    sql_prefix = f"SET SESSION long_query_time=0; SELECT /*{prefix}*/ LENGTH('"
+    sql_suffix = f"') /*{suffix}*/ AS payload_len;"
+    return (
+        f"{{ printf %s {shlex.quote(sql_prefix)}; "
+        f"head -c {payload_bytes} /dev/zero | tr '\\0' x; "
+        f"printf %s {shlex.quote(sql_suffix)}; }} | "
+        f"sudo {shlex.quote(binary)} --comments --batch --skip-column-names --max-allowed-packet=8M"
+    )
+
+
 def mysql_family_large_record(context: LabContext) -> ScenarioResult:
     started = utc_now()
     capacity_check, capacity, configured = receiver_message_capacity(context)
@@ -4330,7 +4341,7 @@ def mysql_family_large_record(context: LabContext) -> ScenarioResult:
     prefix = context.marker("G9", "begin")
     suffix = context.marker("G9", "end")
     binary = "mysql" if context.database == "mysql" else "mariadb"
-    trigger = context.local.run(f"{{ printf 'SELECT /*{prefix}*/ LENGTH(\\\''; head -c {LARGE_RECORD_PAYLOAD_BYTES} /dev/zero | tr '\\0' x; printf '\\\') /*{suffix}*/ AS payload_len;\\n'; }} | sudo {binary} --max-allowed-packet=8M", timeout=180)
+    trigger = context.local.run(mysql_large_record_command(binary, prefix, suffix, LARGE_RECORD_PAYLOAD_BYTES), timeout=180)
     received = context.receiver_event(prefix, timeout=120)
     service = context.local.run("systemctl is-active log-collector", timeout=15)
     assertions = [
