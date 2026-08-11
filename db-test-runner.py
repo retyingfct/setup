@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.19-draft"
+VERSION = "0.4.20-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -2227,7 +2227,12 @@ def pg_config_missing(context: LabContext) -> ScenarioResult:
     action_id = f"H8-{secrets.token_hex(5)}"
     if context.journal:
         context.journal.add({"id": action_id, "scope": "local", "command": restore_command, "sudo": True, "timeout": 120})
-    remove = context.local.run(f"sudo rm -f -- {shlex.quote(config)} {shlex.quote(last_good)}; sudo systemctl restart log-collector", timeout=120) if config else context.local.run("false", timeout=5)
+    remove = context.local.run(
+        f"sudo rm -f -- {shlex.quote(config)} {shlex.quote(last_good)}; sudo systemctl restart log-collector || true; "
+        "for attempt in $(seq 1 20); do state=$(systemctl is-active log-collector); test \"$state\" != activating && break; sleep 1; done; "
+        "printf 'state=%s\\n' \"$state\"; test \"$state\" = active",
+        timeout=150,
+    ) if config else context.local.run("false", timeout=5)
     service = context.local.run("systemctl is-active log-collector", timeout=15)
     logs = context.local.run("sudo journalctl -u log-collector --since '-3 minutes' --no-pager | tail -n 100", timeout=30)
     restore = context.local.run(f"sudo bash -lc {shlex.quote(restore_command)}; sudo rm -rf -- {shlex.quote(backup)}", timeout=120)
@@ -4564,13 +4569,13 @@ def mysql_family_unreachable_output(context: LabContext) -> ScenarioResult:
     if context.journal:
         context.journal.add({"id": recovery_id, "scope": "local", "command": del_rule, "sudo": True, "timeout": 30})
     block = context.local.run(add_rule, sudo=True, timeout=30) if address else context.local.run("false", timeout=5)
+    trigger = mysql_family_marker(context, marker)
     time.sleep(10)
     health = context.local.run("curl -fsS --max-time 5 http://127.0.0.1:9100/status", timeout=15)
     service = context.local.run("systemctl is-active log-collector", timeout=15)
     unblock = context.local.run(del_rule, sudo=True, timeout=30) if address else context.local.run("false", timeout=5)
     if unblock.returncode == 0 and context.journal:
         context.journal.remove(recovery_id)
-    trigger = mysql_family_marker(context, marker)
     received = context.receiver_grep(marker, timeout=90)
     try:
         payload = json.loads(health.stdout)
@@ -4583,7 +4588,7 @@ def mysql_family_unreachable_output(context: LabContext) -> ScenarioResult:
         AssertionResult("health reported disconnected", disconnected, command_fact(health)),
         AssertionResult("delivery recovered", marker in received.stdout, command_fact(received)),
     ]
-    return evaluated_result("H9", "Unreachable output retry", started, [resolved, block, health, service, unblock, trigger, received], assertions, "Collector stayed active and recovered after output became reachable", "Passed" if unblock.returncode == 0 else "Failed")
+    return evaluated_result("H9", "Unreachable output retry", started, [resolved, block, trigger, health, service, unblock, received], assertions, "Collector stayed active and recovered after output became reachable", "Passed" if unblock.returncode == 0 else "Failed")
 
 
 def mysql_family_reboot_resume(context: LabContext) -> ScenarioResult:
@@ -4826,8 +4831,8 @@ def mysql_remote_auth_probe(context: LabContext, scenario_id: str, block_host: b
         "def packet(auth):\n"
         " s=socket.create_connection((h,3306),5);hdr=s.recv(4);n=int.from_bytes(hdr[:3],'little');s.recv(n)\n"
         " if not auth:s.close();return b''\n"
-        " p=struct.pack('<IIB23s',0x00000201,16777216,45,b'')+u.encode()+b'\\0'+bytes([20])+bytes(20)\n"
-        " s.sendall(len(p).to_bytes(3,'little')+b'\\0'+p);r=s.recv(4096);s.close();return r\n"
+        " p=struct.pack('<IIB23s',0x00088205,16777216,45,b'')+u.encode()+b'\\0'+bytes([20])+bytes(20)+b'mysql_native_password\\0'\n"
+        " s.sendall(len(p).to_bytes(3,'little')+b'\\x01'+p);r=s.recv(4096);s.close();return r\n"
         + ("[packet(False) for _ in range(6)];time.sleep(1)\n" if block_host else "")
         + "print(packet(True).decode('latin1','replace'))\n"
     )
