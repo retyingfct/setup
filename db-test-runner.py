@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.22-draft"
+VERSION = "0.4.23-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -4838,10 +4838,10 @@ def mysql_remote_auth_probe(context: LabContext, scenario_id: str, block_host: b
     else:
         configure = old_max
     disconnect_code = (
-        "import socket,time\n"
+        "import socket,struct,time\n"
         f"h={client_ip!r}\n"
-        "for _ in range(6):\n"
-        " s=socket.create_connection((h,3306),5);hdr=s.recv(4);n=int.from_bytes(hdr[:3],'little');s.recv(n);s.close()\n"
+        "for _ in range(10):\n"
+        " s=socket.create_connection((h,3306),5);hdr=s.recv(4);n=int.from_bytes(hdr[:3],'little');s.recv(n);s.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0));s.close()\n"
         "time.sleep(1)\n"
     )
     prelude = f"python3 -c {shlex.quote(disconnect_code)}; " if block_host else ""
