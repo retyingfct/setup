@@ -56,6 +56,8 @@ Version `0.4.32-draft` supersedes `0.4.31-draft` for MariaDB F5d by accepting th
 
 Version `0.4.33-draft` supersedes `0.4.32-draft` for MySQL-family H3/H11 by setting a session-local zero slow-query threshold and preserving comments during buffer-pressure generation. This ensures the generated records actually reach the collector input. All 86 local harness tests pass.
 
+Version `0.4.34-draft` supersedes `0.4.33-draft` for MariaDB F2 by temporarily relaxing a lab profile's permanent `server_audit` load option, journaling the original profile restoration, and restarting MariaDB before and after the missing-plugin probe. All 87 local harness tests pass.
+
 For destructive scenarios, manually create and boot a full dedicated clone of the Ubuntu client, then run this same runner inside the clone. The script does not control VMware or create nested VMs. Do not run destructive scenarios on the original client VM. Oracle installation remains manual because media, licensing, edition, SID, and layout are site-specific. The current Oracle adapter targets a native host installation; it does not execute through Docker or translate container ADR/audit paths to host bind mounts.
 
 Copyright © Forensic CyberTech Pvt. Ltd.

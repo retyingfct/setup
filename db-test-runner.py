@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.33-draft"
+VERSION = "0.4.34-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -5174,16 +5174,40 @@ def mariadb_default_audit(context: LabContext) -> ScenarioResult:
 
 def mariadb_missing_audit_warning(context: LabContext) -> ScenarioResult:
     started = utc_now()
-    plugin = mysql_family_cli(context, "SELECT COUNT(*) FROM information_schema.plugins WHERE plugin_name='SERVER_AUDIT';")
-    installed = plugin.stdout.strip().splitlines()[-1:] == ["1"]
-    remove = mysql_family_cli(context, "UNINSTALL SONAME 'server_audit';") if installed else plugin
+    token = secrets.token_hex(5)
+    profile = "/etc/mysql/mariadb.conf.d/90-log-collector-test.cnf"
+    backup = f"/tmp/lc-f2-{token}.cnf"
+    plugin = mysql_family_cli(context, "SELECT COUNT(*),COALESCE(MAX(LOAD_OPTION),'') FROM information_schema.plugins WHERE plugin_name='SERVER_AUDIT';")
+    fields = plugin.stdout.strip().split("\t")
+    installed = bool(fields and fields[0] == "1")
+    permanent = len(fields) > 1 and "PERMANENT" in fields[1].upper()
+    recovery_id = f"F2-{token}"
+    relax = context.local.run("true", timeout=5)
+    if permanent:
+        recovery_command = f"cp -a -- {shlex.quote(backup)} {shlex.quote(profile)}; systemctl restart mariadb; rm -f -- {shlex.quote(backup)}"
+        if context.journal:
+            context.journal.add({"id": recovery_id, "scope": "local", "command": recovery_command, "sudo": True, "timeout": 180})
+        relax = context.local.run(
+            f"sudo cp -a -- {shlex.quote(profile)} {shlex.quote(backup)}; sudo sed -i 's/^server_audit=.*/server_audit=ON/' {shlex.quote(profile)}; sudo systemctl restart mariadb",
+            timeout=180,
+        )
+    remove = mysql_family_cli(context, "UNINSTALL SONAME 'server_audit';") if installed and relax.returncode == 0 else plugin
     dependency, probe = setup_wizard_probe(context, r"(?is)server_audit.*(?:install soname|install plugin|not installed|missing)")
-    restore = mysql_family_cli(context, "INSTALL SONAME 'server_audit';") if installed else plugin
+    if permanent:
+        restore = context.local.run(
+            f"sudo cp -a -- {shlex.quote(backup)} {shlex.quote(profile)}; sudo systemctl restart mariadb; sudo rm -f -- {shlex.quote(backup)}",
+            timeout=180,
+        )
+        if restore.returncode == 0 and context.journal:
+            context.journal.remove(recovery_id)
+    else:
+        restore = mysql_family_cli(context, "INSTALL SONAME 'server_audit';") if installed else plugin
     assertions = [
+        AssertionResult("permanent plugin safely relaxed", relax.returncode == 0, command_fact(relax)),
         AssertionResult("server_audit absent for probe", remove.returncode == 0, command_fact(remove)),
         AssertionResult("exact enablement guidance displayed", probe.returncode == 0 and bool(re.search(r"INSTALL\s+(?:SONAME|PLUGIN)", probe.stdout, re.I)), command_fact(probe)),
     ]
-    return evaluated_result("F2", "Missing server_audit warning", started, [plugin, remove, dependency, probe, restore], assertions, "Wizard displayed exact server_audit enablement statements", "Passed" if restore.returncode == 0 else "Failed")
+    return evaluated_result("F2", "Missing server_audit warning", started, [plugin, relax, remove, dependency, probe, restore], assertions, "Wizard displayed exact server_audit enablement statements", "Passed" if restore.returncode == 0 else "Failed")
 
 
 def mariadb_log_basename(context: LabContext) -> ScenarioResult:
