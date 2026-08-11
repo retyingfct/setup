@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.12-draft"
+VERSION = "0.4.13-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -3750,12 +3750,12 @@ def mysql_slow_multiline(context: LabContext) -> ScenarioResult:
 
 def mysql_slow_no_index(context: LabContext) -> ScenarioResult:
     marker = context.marker("D4b", "table")[:40]
-    return mysql_slow_case(context, "D4b", "Unindexed query slow logging", [f"DROP TABLE IF EXISTS {marker}; CREATE TABLE {marker}(id INT); INSERT INTO {marker} VALUES (1),(2); SELECT /*{{marker}}*/ * FROM {marker} WHERE id=2; DROP TABLE {marker};"], ["WHERE id=2"], temporary_settings={"log_queries_not_using_indexes": "ON"})
+    return mysql_slow_case(context, "D4b", "Unindexed query slow logging", [f"CREATE DATABASE IF NOT EXISTS log_collector_test; USE log_collector_test; DROP TABLE IF EXISTS {marker}; CREATE TABLE {marker}(id INT); INSERT INTO {marker} VALUES (1),(2); SELECT /*{{marker}}*/ * FROM {marker} WHERE id=2; DROP TABLE {marker};"], ["WHERE id=2"], temporary_settings={"log_queries_not_using_indexes": "ON"})
 
 
 def mysql_slow_admin(context: LabContext) -> ScenarioResult:
     table = context.marker("D4c", "table")[:40]
-    return mysql_slow_case(context, "D4c", "Slow administrative statement", [f"DROP TABLE IF EXISTS {table}; CREATE TABLE {table}(id INT); ALTER TABLE {table} ADD COLUMN /*{{marker}}*/ note TEXT; DROP TABLE {table};"], ["ALTER TABLE"], temporary_settings={"log_slow_admin_statements": "ON"})
+    return mysql_slow_case(context, "D4c", "Slow administrative statement", [f"CREATE DATABASE IF NOT EXISTS log_collector_test; USE log_collector_test; DROP TABLE IF EXISTS {table}; CREATE TABLE {table}(id INT); ALTER TABLE {table} ADD COLUMN /*{{marker}}*/ note TEXT; DROP TABLE {table};"], ["ALTER TABLE"], temporary_settings={"log_slow_admin_statements": "ON"})
 
 
 def mysql_slow_volume(context: LabContext) -> ScenarioResult:
@@ -4362,7 +4362,7 @@ def mysql_family_high_volume(context: LabContext) -> ScenarioResult:
     if len(values) != 2:
         values = ["0", "10"]
     change = mysql_family_cli(context, "SET GLOBAL slow_query_log=ON; SET GLOBAL long_query_time=0;")
-    generator = context.local.run(f"for i in $(seq -w 1 1000); do printf 'SELECT /*{prefix}_%s*/ 1;\\n' \"$i\"; done | sudo {binary} --batch", timeout=300)
+    generator = context.local.run(f"for i in $(seq -w 1 1000); do printf 'SELECT /*{prefix}_%s*/ 1;\\n' \"$i\"; done | sudo {binary} --batch --comments", timeout=300)
     received = context.receiver_grep(f"{prefix}_1000", timeout=180)
     all_lines = context.receiver.run(f"grep -F -- {shlex.quote(prefix + '_')} {shlex.quote(context.receiver_log)}", sudo=True, timeout=60)
     health = context.local.run("curl -fsS --max-time 5 http://127.0.0.1:9100/status", timeout=15)
