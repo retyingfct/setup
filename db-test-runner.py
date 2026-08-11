@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.18-draft"
+VERSION = "0.4.19-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -2405,7 +2405,7 @@ def pg_reboot_resume(context: LabContext) -> ScenarioResult:
     if context.evidence is None:
         raise RuntimeError("H6 requires an evidence run")
     started = utc_now()
-    scenario_dir = context.evidence.run_dir / "scenarios" / "H6"
+    scenario_dir = (context.evidence.run_dir / "scenarios" / "H6").resolve()
     phase_file = scenario_dir / "post-reboot.txt"
     marker = context.marker("H6", "post_reboot")
     if phase_file.exists():
@@ -2425,7 +2425,7 @@ def pg_reboot_resume(context: LabContext) -> ScenarioResult:
     phase_command = (
         "for i in $(seq 1 60); do systemctl is-active --quiet postgresql && systemctl is-active --quiet log-collector && break; sleep 2; done; "
         f"runuser -u postgres -- psql -q -c {shlex.quote("COMMENT ON TABLE public.lc_runner_anchor IS '" + marker + "';")}; "
-        f"printf 'collector=%s\\ndatabase=%s\\nmarker={marker}\\nboot_id=%s\\n' \"$(systemctl is-active log-collector)\" \"$(systemctl is-active postgresql)\" \"$(cat /proc/sys/kernel/random/boot_id)\" > {shlex.quote(str(phase_file))}"
+        f"printf 'collector=%%s\\ndatabase=%%s\\nmarker={marker}\\nboot_id=%%s\\n' \"$(systemctl is-active log-collector)\" \"$(systemctl is-active postgresql)\" \"$(cat /proc/sys/kernel/random/boot_id)\" > {shlex.quote(str(phase_file))}"
     )
     unit = f"[Unit]\nDescription=Log collector H6 post-reboot continuation\nAfter=network-online.target postgresql.service log-collector.service\n\n[Service]\nType=oneshot\nExecStart=/bin/bash -lc {shlex.quote(phase_command)}\n\n[Install]\nWantedBy=multi-user.target\n"
     prepare = context.local.run(f"printf %s {shlex.quote(unit)} | sudo tee {unit_path} >/dev/null; sudo systemctl daemon-reload; sudo systemctl enable lc-h6-continuation.service", timeout=60)
@@ -4590,7 +4590,7 @@ def mysql_family_reboot_resume(context: LabContext) -> ScenarioResult:
     if context.evidence is None:
         raise RuntimeError("H6 requires an evidence run")
     started = utc_now()
-    scenario_dir = context.evidence.run_dir / "scenarios" / "H6"
+    scenario_dir = (context.evidence.run_dir / "scenarios" / "H6").resolve()
     phase_file = scenario_dir / "post-reboot.txt"
     marker = context.marker("H6", "post_reboot")
     service_name = mysql_family_service(context)
@@ -4607,7 +4607,7 @@ def mysql_family_reboot_resume(context: LabContext) -> ScenarioResult:
         return evaluated_result("H6", "Machine reboot continuity", started, [phase, received, enabled, cleanup], assertions, "Collector returned automatically and resumed database collection")
     scenario_dir.mkdir(parents=True, exist_ok=True)
     binary = "mysql" if context.database == "mysql" else "mariadb"
-    phase_command = f"for i in $(seq 1 60); do systemctl is-active --quiet {service_name} && systemctl is-active --quiet log-collector && break; sleep 2; done; {binary} -e {shlex.quote('SELECT /*' + marker + '*/ SLEEP(0.2);')}; printf 'collector=%s\\ndatabase=%s\\nmarker={marker}\\n' \"$(systemctl is-active log-collector)\" \"$(systemctl is-active {service_name})\" > {shlex.quote(str(phase_file))}"
+    phase_command = f"for i in $(seq 1 60); do systemctl is-active --quiet {service_name} && systemctl is-active --quiet log-collector && break; sleep 2; done; {binary} --comments -e {shlex.quote('SET SESSION long_query_time=0; SELECT /*' + marker + '*/ SLEEP(0.2);')}; printf 'collector=%%s\\ndatabase=%%s\\nmarker={marker}\\n' \"$(systemctl is-active log-collector)\" \"$(systemctl is-active {service_name})\" > {shlex.quote(str(phase_file))}"
     unit = f"[Unit]\nDescription=Log collector H6 continuation\nAfter=network-online.target {service_name}.service log-collector.service\n\n[Service]\nType=oneshot\nExecStart=/bin/bash -lc {shlex.quote(phase_command)}\n\n[Install]\nWantedBy=multi-user.target\n"
     prepare = context.local.run(f"printf %s {shlex.quote(unit)} | sudo tee /etc/systemd/system/lc-h6-continuation.service >/dev/null; sudo systemctl daemon-reload; sudo systemctl enable lc-h6-continuation.service", timeout=60)
     if prepare.returncode != 0:
@@ -6305,7 +6305,7 @@ def oracle_reboot_resume(context: LabContext) -> ScenarioResult:
     if context.evidence is None:
         raise RuntimeError("H6 requires an evidence run")
     started = utc_now()
-    scenario_dir = context.evidence.run_dir / "scenarios" / "H6"
+    scenario_dir = (context.evidence.run_dir / "scenarios" / "H6").resolve()
     phase_file = scenario_dir / "post-reboot.txt"
     marker = context.marker("H6", "post_reboot")
     if phase_file.exists():
@@ -6324,7 +6324,7 @@ def oracle_reboot_resume(context: LabContext) -> ScenarioResult:
     phase_command = (
         "for i in $(seq 1 90); do systemctl is-active --quiet log-collector && pgrep -f ora_pmon >/dev/null && break; sleep 2; done; "
         f"printf %s {shlex.quote(sql)} | runuser -u oracle -- bash -lc \"sqlplus -s '/ as sysdba'\"; "
-        f"printf 'collector=%s\\nmarker={marker}\\n' \"$(systemctl is-active log-collector)\" > {shlex.quote(str(phase_file))}"
+        f"printf 'collector=%%s\\nmarker={marker}\\n' \"$(systemctl is-active log-collector)\" > {shlex.quote(str(phase_file))}"
     )
     unit = f"[Unit]\nDescription=Log collector Oracle H6 continuation\nAfter=network-online.target log-collector.service\n\n[Service]\nType=oneshot\nExecStart=/bin/bash -lc {shlex.quote(phase_command)}\n\n[Install]\nWantedBy=multi-user.target\n"
     prepare = context.local.run(f"printf %s {shlex.quote(unit)} | sudo tee /etc/systemd/system/lc-h6-continuation.service >/dev/null; sudo systemctl daemon-reload; sudo systemctl enable lc-h6-continuation.service", timeout=60)
