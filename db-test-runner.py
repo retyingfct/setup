@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.24-draft"
+VERSION = "0.4.25-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -2729,7 +2729,7 @@ def setup_wizard_probe(
     patterns = [
         target_pattern,
         r"(?i)agent\s*(?:id|identifier)[^\r\n]*[?:›]\s*$",
-        r"(?i)(?:client|tenant)(?:\s*/\s*(?:client|tenant))?\s*(?:name)?[^\r\n]*[?:›]\s*$",
+        r"(?i)(?:(?:client|tenant)(?:\s*/\s*(?:client|tenant))?\s*(?:name)?|client\s*tag)[^\r\n]*[?:›]\s*$",
         r"(?m)[^\r\n]{2,}[?:›]\s*$",
         pexpect.EOF,
         pexpect.TIMEOUT,
@@ -2794,7 +2794,7 @@ def complete_setup_wizard(
     error = ""
     patterns = [
         r"(?i)agent\s*(?:id|identifier)[^\r\n]*[?:›]\s*$",
-        r"(?i)(?:client|tenant)(?:\s*/\s*(?:client|tenant))?\s*(?:name)?[^\r\n]*[?:›]\s*$",
+        r"(?i)(?:(?:client|tenant)(?:\s*/\s*(?:client|tenant))?\s*(?:name)?|client\s*tag)[^\r\n]*[?:›]\s*$",
         r"(?i)auto.?discover(?:y|ed)[^\r\n]*[?:›]\s*$",
         r"(?i)read[^\r\n]*beginning[^\r\n]*[?:›]\s*$",
         r"(?i)merge[^\r\n]*(?:continuation|detail|hint|context)[^\r\n]*[?:›]\s*$",
