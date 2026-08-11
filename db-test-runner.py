@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
-VERSION = "0.4.31-draft"
+VERSION = "0.4.32-draft"
 DATABASES = ("postgresql", "mysql", "mariadb", "oracle")
 STATUSES = ("Pass", "Fail", "Not Tested", "Inconclusive", "Cleanup Failed")
 Risk = Literal["safe", "configuration", "disruptive", "destructive", "manual"]
@@ -4020,7 +4020,7 @@ def mariadb_audit_retcode(context: LabContext) -> ScenarioResult:
     received = context.receiver_grep(marker, timeout=90)
     restore = mariadb_restore_audit(context, state)
     commands.extend([trigger, received, restore])
-    retcodes = [int(value) for value in re.findall(r"(?:retcode[=\": ]+|,)(\d+)(?:,|\b)", received.stdout, re.I)]
+    retcodes = [int(value) for value in re.findall(r"(?:retcode[=\": ]+|\brc=|,)(\d+)(?:\([^)]*\))?(?:,|\b)", received.stdout, re.I)]
     assertions = [
         AssertionResult("query failed as intended", trigger.returncode != 0, command_fact(trigger)),
         AssertionResult("nonzero retcode parsed", any(value != 0 for value in retcodes), str(retcodes)),

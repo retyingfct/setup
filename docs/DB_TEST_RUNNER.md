@@ -52,6 +52,8 @@ Version `0.4.31-draft` contains all 400 management rows. Executable adapters are
 
 The G9 multi-megabyte test uses the lower effective value of imrelp `maxDataSize` and global `maxMessageSize`. A known limit below the generated record makes the scenario `Inconclusive` instead of falsely blaming the collector. Configure both to at least 2112 KiB; the companion `receiver.sh` defaults both to 4096 KiB. Receiver-outage scenarios stop `syslog.socket` and `rsyslog.service` and verify RELP port 2514 is closed before testing.
 
+Version `0.4.32-draft` supersedes `0.4.31-draft` for MariaDB F5d by accepting the collector's rendered `rc=<number>(failure)` audit field. All 85 local harness tests pass.
+
 For destructive scenarios, manually create and boot a full dedicated clone of the Ubuntu client, then run this same runner inside the clone. The script does not control VMware or create nested VMs. Do not run destructive scenarios on the original client VM. Oracle installation remains manual because media, licensing, edition, SID, and layout are site-specific. The current Oracle adapter targets a native host installation; it does not execute through Docker or translate container ADR/audit paths to host bind mounts.
 
 Copyright © Forensic CyberTech Pvt. Ltd.
